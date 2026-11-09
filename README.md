@@ -39,30 +39,58 @@ If a download fails, the game falls back to the next source: Sketchfab → Kenne
 | --- | --- |
 | W / ↑, S / ↓ | throttle / brake |
 | A / ←, D / → | steer freely (hold to change lanes, tap to nudge; the car straightens itself when released) |
-| 1–5 | switch car |
+| 1–9, 0 | switch car (ten cars, worst → best) |
 | C | chase ↔ bumper camera |
 | N | golden hour ↔ wet night |
 | H | toggle HUD |
 
-URL params: `?car=bavaria`, `?preset=night`, `?intro=0` (skip the crane shot), `?s=600` (start 600 m down the road),
+URL params: `?car=e34`, `?platform=local` (skip the SDK), `?preset=night`, `?intro=0` (skip the crane shot), `?s=600` (start 600 m down the road),
 `?cam=bumper`.
 
 ## Garage
 
-| # | In game | Prototype | Drive | Sketchfab model (CC BY) | Fallback |
+Ten cars, from worst to best. The models are committed in `public/assets/vehicles/garage` (≈15 MB after optimization);
+sources and authors are in [CREDITS.md](CREDITS.md). This build is for private, local use.
+
+| Key | In game | Car | Drive | Power | Triangles |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Samurai II | Toyota Mark II JZX100 | RWD | [Toyota Chaser Tourer V (JZX100)](https://sketchfab.com/3d-models/d52227ff4f034942a86dfcefe44deeac) — Car2022 | Kenney `sedan-sports` |
-| 2 | Vesta RS | Lada Vesta Sport | FWD | [Lada Vesta](https://sketchfab.com/3d-models/3c333139feb744ae9d36767c0e9cabfd) — tiunov.se | Kenney `sedan` |
-| 3 | Priora Drive | Lada Priora | FWD | [Priora](https://sketchfab.com/3d-models/1551b8223bdf4d78ab3e8e568530836d) — faffdf | Kenney `sedan` |
-| 4 | Bavaria M-Sedan | BMW M5 F90 | AWD | [Bmw M5 F90](https://sketchfab.com/3d-models/5478e978bd634337adc8e3dc413fbfa3) — Res1n | Kenney `sedan-sports` |
-| 5 | Stuttgart E-AMG | Mercedes-AMG E63 S | AWD | [Mercedes-AMG E 63 S (W213)](https://sketchfab.com/3d-models/f61d8efb0b9b4c499fc66fcf35a4d09c) — Car2022 | Kenney `sedan` |
+| 1 | Жига | VAZ «classic» (AI-generated model) | RWD | 64 hp | 5k |
+| 2 | Гибрид | Toyota Prius | FWD | 122 hp | 19k |
+| 3 | Камри 3.5 | Toyota Camry XV70 | FWD | 249 hp | 80k |
+| 4 | Пятёрка E34 | BMW E34, stance | RWD | 192 hp | 113k |
+| 5 | Samurai II | Toyota Chaser Tourer V JZX100 | RWD | 350 hp | 121k |
+| 6 | Stuttgart 300SL | Mercedes-Benz 300SL «Gullwing», restomod | RWD | 340 hp | 90k |
+| 7 | Эво X | Mitsubishi Lancer Evo X | AWD | 295 hp | 30k |
+| 8 | Скайлайн R34 | Nissan Skyline GT-R R34 | AWD | 390 hp | 87k |
+| 9 | Супра MK4 | Toyota Supra A80, 2JZ build | RWD | 500 hp | 77k |
+| 0 | Bavaria M4 | BMW M4 G82 | AWD | 510 hp | 97k |
 
-Traffic (for Step 4): Toyota Camry 40, Renault Logan, LADA 2107, Škoda Octavia, Land Cruiser 100, a taxi and a Kamaz,
-all CC BY. The full list is in `scripts/sketchfab-models.mjs`.
+Grip, steering sharpness and suspension stiffness rise along the list (`handling()` in `src/assets/vehicles.ts`).
+The HUD shows the model credit under the car name. A `public/assets/vehicles/custom/<id>.glb` overrides any car
+(see the [README there](public/assets/vehicles/custom/README.md)).
 
-Cars use fictional names in the game, and separate badge/logo meshes are hidden. CC BY requires crediting the author, so
-the HUD shows the model credit under the car name. A model in `public/assets/vehicles/custom/<id>.glb` overrides
-everything (see the [README there](public/assets/vehicles/custom/README.md)).
+Traffic models (for Step 4) are low-poly, 1–6k triangles with 512 px textures, in `public/assets/vehicles/traffic`.
+
+## Yandex Games SDK
+
+`src/platform/YandexPlatform.ts` loads `/sdk.js` and runs `YaGames.init()`. If the script isn't there (plain
+`npm run dev`), a local stand-in with the same interface takes over and saves to `localStorage`. The HUD shows which one
+is active.
+
+| SDK call | When |
+| --- | --- |
+| `features.LoadingAPI.ready()` | the loading screen closes |
+| `features.GameplayAPI.start()` / `stop()` | driving starts; stops for ads and hidden tabs (the simulation pauses too) |
+| `getPlayer().getData()` / `setData()` | the selected car and the best distance |
+| `adv.showFullscreenAdv()` | after switching cars, at most once a minute |
+| `leaderboards.setScore('distance', m)` | best distance, every 30 s and on page hide (authorized players only) |
+
+To test against the real SDK locally:
+
+```bash
+npm run build
+npx @yandex-games/sdk-dev-proxy -p dist --dev-mode=true   # https://localhost:8080
+```
 
 ## Status
 
@@ -95,8 +123,10 @@ everything (see the [README there](public/assets/vehicles/custom/README.md)).
   collisions with speed loss. Body roll and pitch run on damped springs, the wheels spin and steer, and the brake
   lights work. The chase camera lags behind lateral moves.
 
+**Yandex Games SDK adapter (done, ahead of Step 6)** — see above.
+
 Next steps: 3 — deeper chassis physics (weight transfer, drift) · 4 — traffic · 5 — near miss / combo ·
-6 — touch + Yandex SDK.
+6 — touch controls.
 
 ## Layout
 
@@ -107,5 +137,6 @@ src/
 ├── graphics/   environment/IBL, materials, procedural textures, road shader, post FX, camera, scenery
 ├── road/       RoadLayout (pocket zones, lane queries), chunk builder, streamer
 ├── vehicle/    PlayerCar (handling), CarView (model, suspension, wheels, lights)
+├── platform/   Yandex Games SDK adapter + local stand-in
 └── ui/         loading screen + HUD
 ```

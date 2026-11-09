@@ -6,3 +6,4 @@ public/assets/vehicles/kenney/
 public/assets/draco/
 *.log
 .DS_Store
+.tmp/

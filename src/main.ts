@@ -13,6 +13,7 @@ import { PostFX } from './graphics/PostFX';
 import { Scenery } from './graphics/Scenery';
 import { StreetLightPool } from './graphics/StreetLightPool';
 import { RoadStreamer } from './road/RoadStreamer';
+import { initPlatform } from './platform/YandexPlatform';
 import { Hud } from './ui/Hud';
 import { CarView } from './vehicle/CarView';
 import { PlayerCar } from './vehicle/PlayerCar';
@@ -67,7 +68,14 @@ async function boot(): Promise<void> {
   const env = new Environment(renderer, scene, mobile);
   const envReady = env.preloadAll();
   const loader = new VehicleLoader();
-  let spec: VehicleSpec = findPlayerCar(params.get('car'));
+  // The SDK must be up before anything is saved or reported; locally this falls back instantly.
+  const platform = await initPlatform();
+  interface SaveData {
+    car?: string;
+    bestKm?: number;
+  }
+  const save: SaveData = await platform.loadData<SaveData>();
+  let spec: VehicleSpec = findPlayerCar(params.get('car') ?? save.car ?? null);
   const viewReady = CarView.create(loader, spec);
 
   await step('Процедурная трасса…', 0.55);
@@ -122,11 +130,16 @@ async function boot(): Promise<void> {
       view.setNight(env.preset === 'night');
       car.setVehicle(spec.handling, view.model.wheelbase, view.model.width, view.model.length);
       void showCar();
+      save.car = spec.id;
+      void platform.saveData(save);
+      // A natural break: the platform throttles these to one a minute.
+      void platform.showInterstitial();
     } finally {
       switching = false;
     }
   };
-  PLAYER_CARS.forEach((c, i) => input.onKey(`Digit${i + 1}`, () => void switchCar(c)));
+  // Keys 1–9, then 0 for the tenth car.
+  PLAYER_CARS.forEach((c, i) => input.onKey(`Digit${(i + 1) % 10}`, () => void switchCar(c)));
 
   // Optional start offset (?s=meters) is handy for jumping straight to a pocket.
   const startS = Number(params.get('s') ?? 0);
@@ -154,6 +167,10 @@ async function boot(): Promise<void> {
   await renderer.compileAsync(scene, rig.camera);
   await step('Готово', 1);
   hud.hideLoader();
+  platform.loadingReady();
+  hud.setPlatform(platform.kind === 'yandex' ? 'Яндекс Игры' : 'локально');
+  let paused = false;
+  platform.onPauseChange((p) => (paused = p));
 
   const onResize = () => {
     renderer.setSize(innerWidth, innerHeight);
@@ -166,11 +183,27 @@ async function boot(): Promise<void> {
   let time = 0;
   let hudTimer = 0;
   const controls = { throttle: 0, brake: 0, steer: 0 };
+  // Distance from where this run started; best result goes to the leaderboard.
+  const runStart = car.s;
+  let reportedKm = save.bestKm ?? 0;
+  const reportBest = () => {
+    const km = (car.s - runStart) / 1000;
+    if (km <= reportedKm + 0.05) return;
+    reportedKm = km;
+    save.bestKm = Math.round(km * 100) / 100;
+    void platform.saveData(save);
+    void platform.submitScore('distance', Math.round(km * 1000));
+  };
+  addEventListener('pagehide', reportBest);
+  setInterval(reportBest, 30_000);
 
   const loop = new GameLoop({
     fixedUpdate: (dt) => {
+      // Ads and hidden tabs freeze the simulation.
+      if (paused) return;
       // Controls stay locked until the intro crane shot lands.
       const live = rig.introDone;
+      if (live) platform.gameplayStart();
       controls.throttle = live && input.isDown('throttle') ? 1 : 0;
       controls.brake = live && input.isDown('brake') ? 1 : 0;
       controls.steer = live ? input.steer : 0;
@@ -221,7 +254,7 @@ async function boot(): Promise<void> {
 
   // Debug handle for console tinkering and automated screenshots.
   Object.assign(window, {
-    __game: { renderer, scene, car, road, env, rig, applyPreset, switchCar, get view() { return view; } },
+    __game: { renderer, scene, car, road, env, rig, applyPreset, switchCar, platform, get view() { return view; } },
   });
 }
 

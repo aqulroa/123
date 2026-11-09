@@ -27,6 +27,8 @@ export interface FitSpec {
   rim: number;
   tint: number;
   stance?: number;
+  /** Turn the model around when automatic front detection gets it wrong. */
+  flip?: boolean;
 }
 
 export interface WheelRig {
@@ -90,7 +92,8 @@ interface TriInfo {
 }
 
 // `\brim` / `rim_` so "trim" doesn't count as a wheel part.
-const WHEEL_RE = /wheel|tire|tyre|\brim|rim_|brake_?disc|caliper/i;
+// `(?<![tp])rim` matches "Rims", "Meshesrim1Mtl", but not "trim" or "primer".
+const WHEEL_RE = /wheel|tire|tyre|(?<![tp])rim|brake_?disc|caliper/i;
 const RED = (c: number[]) => c[0] > 0.55 && c[1] < 0.42 && c[2] < 0.42;
 const YELLOW = (c: number[]) => c[0] > 0.85 && c[1] > 0.65 && c[2] < 0.5;
 const lum = (c: number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
@@ -116,25 +119,26 @@ export class VehicleLoader {
   /** Tries each source in order; falls back to a procedural car so the game never blocks. */
   async load(sources: string[], spec: FitSpec): Promise<VehicleModel> {
     for (const src of sources) {
-      const template = await this.template(src);
+      const template = await this.template(src, spec.flip ?? false);
       if (template) return instantiate(template, spec, src);
     }
     console.warn(`No vehicle model available (${sources.join(', ')}); using procedural body.`);
     return proceduralCar(spec);
   }
 
-  private template(src: string): Promise<Template | null> {
-    let t = this.templates.get(src);
+  private template(src: string, flip: boolean): Promise<Template | null> {
+    const key = `${src}|${flip}`;
+    let t = this.templates.get(key);
     if (!t) {
       t = this.gltf
         .loadAsync(this.base + src)
-        .then((gltf) => analyse(gltf.scene, { hideBadges: true }))
+        .then((gltf) => analyse(gltf.scene, { hideBadges: true, flip }))
         .catch((err: unknown) => {
           // Only the last-resort stock models must exist; drop-in and Sketchfab ones are optional.
           if (src.includes('/kenney/')) console.warn(`Vehicle "${src}" failed to load`, err);
           return null;
         });
-      this.templates.set(src, t);
+      this.templates.set(key, t);
     }
     return t;
   }
@@ -263,7 +267,7 @@ function classifyByName(name: string): PartClass | null {
   const n = name.toLowerCase();
   if (/interior|cabin|seat|dash|steering|pedal|carpet|leather|gauge|speedo/.test(n)) return 'keep';
   // Lamp lenses are often named "*_glass", so lights are matched before glass.
-  if (/tail|brake_?light|rear_?light|stop_?l|lights_red|backlight|reverse/.test(n)) return 'tail';
+  if (/tail|brake_?light|rear_?light|stop_?l|lights_red|red_?lights?|backlight|reverse/.test(n)) return 'tail';
   if (/head|light|lamp|\bleds?\b|leds|projector|drl|fog/.test(n)) return 'head';
   if (/glass|window|windshield|windscreen/.test(n)) return 'glass';
   if (/chrome/.test(n)) return 'chrome';
@@ -351,7 +355,94 @@ function triangleArea(geo: THREE.BufferGeometry, toModel: THREE.Matrix4, start: 
   }
 }
 
-function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean }): Template {
+const rawCache = new WeakMap<object, ImageData | null>();
+
+/** Texture pixels (downscaled to ≤256 px), for colour sampling only. */
+function texturePixels(tex: THREE.Texture): ImageData | null {
+  const img = tex.image as CanvasImageSource & { width: number; height: number };
+  if (!img || !img.width) return null;
+  if (rawCache.has(img)) return rawCache.get(img)!;
+  let data: ImageData | null = null;
+  try {
+    const w = Math.min(img.width, 256);
+    const h = Math.min(img.height, 256);
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d', { willReadFrequently: true })!;
+    g.drawImage(img, 0, 0, w, h);
+    data = g.getImageData(0, 0, w, h);
+  } catch {
+    data = null;
+  }
+  rawCache.set(img, data);
+  return data;
+}
+
+/**
+ * +1 if red surfaces (tail lamps) cluster at the +axis end, -1 at the -axis
+ * end, 0 if unclear. Per material: a material that is red at both ends (red
+ * paint, side markers) cancels out; only lopsided ones vote.
+ */
+function redEndVote(meshes: THREE.Mesh[], along: (v: THREE.Vector3) => number, halfLength: number): number {
+  const perMat = new Map<THREE.Material, { plus: number; minus: number }>();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const col = new THREE.Color();
+  for (const m of meshes) {
+    const geo = m.geometry;
+    const pos = geo.getAttribute('position');
+    const uv = geo.getAttribute('uv');
+    const index = geo.getIndex();
+    const mats = materialsOf(m);
+    const gs = geo.groups.length ? geo.groups : [{ start: 0, count: index ? index.count : pos.count, materialIndex: 0 }];
+    for (const g of gs) {
+      const mat = (mats[g.materialIndex ?? 0] ?? mats[0]) as THREE.MeshStandardMaterial;
+      if (!mat.color) continue;
+      const px = mat.map && uv ? texturePixels(mat.map) : null;
+      const tris = g.count / 3;
+      const step = Math.max(1, Math.floor(tris / 3000));
+      for (let t = g.start / 3; t < (g.start + g.count) / 3; t += step) {
+        const ia = index ? index.getX(t * 3) : t * 3;
+        const ib = index ? index.getX(t * 3 + 1) : t * 3 + 1;
+        const ic = index ? index.getX(t * 3 + 2) : t * 3 + 2;
+        a.fromBufferAttribute(pos, ia);
+        b.fromBufferAttribute(pos, ib);
+        c.fromBufferAttribute(pos, ic);
+        const centre = a.add(b).add(c).multiplyScalar(1 / 3).applyMatrix4(m.matrixWorld);
+        const d = along(centre);
+        if (Math.abs(d) < halfLength * 0.84) continue;
+        col.copy(mat.color);
+        if (px && uv) {
+          const u = (uv.getX(ia) + uv.getX(ib) + uv.getX(ic)) / 3;
+          const v = (uv.getY(ia) + uv.getY(ib) + uv.getY(ic)) / 3;
+          const x = Math.min(px.width - 1, Math.max(0, Math.floor((((u % 1) + 1) % 1) * px.width)));
+          const y = Math.min(px.height - 1, Math.max(0, Math.floor((((v % 1) + 1) % 1) * px.height)));
+          const p = (y * px.width + x) * 4;
+          col.r *= px.data[p] / 255;
+          col.g *= px.data[p + 1] / 255;
+          col.b *= px.data[p + 2] / 255;
+        }
+        if (col.r > 0.3 && col.g < col.r * 0.45 && col.b < col.r * 0.45) {
+          const e = perMat.get(mat) ?? { plus: 0, minus: 0 };
+          if (d > 0) e.plus += step;
+          else e.minus += step;
+          perMat.set(mat, e);
+        }
+      }
+    }
+  }
+  let vote = 0;
+  for (const { plus, minus } of perMat.values()) {
+    if (plus + minus < 4) continue;
+    if (plus > minus * 3) vote += 1;
+    else if (minus > plus * 3) vote -= 1;
+  }
+  return Math.sign(vote);
+}
+
+function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean; flip: boolean }): Template {
   scene.updateMatrixWorld(true);
   let meshes: THREE.Mesh[] = [];
   scene.traverse((o) => {
@@ -395,8 +486,11 @@ function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean }): Template
       if (RED(t.color) && Math.abs(along(t.centroid)) > 0.4 * (longX ? rawSize.x : rawSize.z)) rearScore += Math.sign(along(t.centroid)) * 0.05;
     }
   }
+  // Names are often missing or misleading, so red surfaces at one end of the car
+  // (tail lamps, from material colours or textures) get a stronger vote.
+  rearScore += 2 * redEndVote(meshes, along, (longX ? rawSize.x : rawSize.z) / 2);
   // glTF convention is +Z forward, so with no evidence assume the rear is at -Z.
-  const rearSign = rearScore === 0 ? -1 : Math.sign(rearScore);
+  const rearSign = (rearScore === 0 ? -1 : Math.sign(rearScore)) * (opts.flip ? -1 : 1);
   // Rotate so the front ends up at -Z (rear at +X → yaw -90°, rear at -X → +90°).
   const yaw = longX ? (rearSign > 0 ? -Math.PI / 2 : Math.PI / 2) : rearSign > 0 ? 0 : Math.PI;
   const orient = new THREE.Matrix4().makeRotationY(yaw);
@@ -558,6 +652,8 @@ function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean }): Template
     let area = 0;
     for (const [mat, s] of stats) {
       // Body panels run from the sills to the roofline.
+      // Textured paint (AI scans, liveries) would lose its detail if repainted, so keep it.
+      if ((mat as THREE.MeshStandardMaterial).map) continue;
       if (yRel(s.yMax) > 0.8 && yRel(s.yMin) < 0.45 && s.area > area) {
         area = s.area;
         paint = mat;

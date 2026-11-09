@@ -7,14 +7,24 @@ export interface ModelCredit {
   licenseUrl: string;
 }
 
-let credits: Promise<Record<string, ModelCredit>> | null = null;
+const cache = new Map<string, Promise<Record<string, ModelCredit>>>();
 
-/** Attribution for a loaded vehicle source (CC BY requires crediting the author). */
+function credits(file: string): Promise<Record<string, ModelCredit>> {
+  let p = cache.get(file);
+  if (!p) {
+    p = fetch(`${import.meta.env.BASE_URL}${file}`)
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({}));
+    cache.set(file, p);
+  }
+  return p;
+}
+
+/** Attribution for a loaded vehicle source, shown under the car name. */
 export async function creditFor(source: string): Promise<ModelCredit | null> {
-  const m = /\/sketchfab\/([\w-]+)\.glb$/.exec(source);
-  if (!m) return null;
-  credits ??= fetch(`${import.meta.env.BASE_URL}assets/vehicles/sketchfab/credits.json`)
-    .then((r) => (r.ok ? r.json() : {}))
-    .catch(() => ({}));
-  return (await credits)[m[1]] ?? null;
+  const sketchfab = /\/sketchfab\/([\w-]+)\.glb$/.exec(source);
+  if (sketchfab) return (await credits('assets/vehicles/sketchfab/credits.json'))[sketchfab[1]] ?? null;
+  const local = /\/vehicles\/((?:garage|traffic)\/[\w-]+)\.glb$/.exec(source);
+  if (local) return (await credits('assets/vehicles/credits.json'))[local[1]] ?? null;
+  return null;
 }
