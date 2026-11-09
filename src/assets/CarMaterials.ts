@@ -46,10 +46,12 @@ export class CarLights {
   }
 
   private apply(): void {
-    // Values are HDR: anything above the bloom threshold (~1) glows. Tail lights stay
-    // moderate because ACES desaturates very bright reds towards salmon.
-    this.head.emissiveIntensity = this.night ? 9 : 1.4;
-    this.tail.emissiveIntensity = this.braking ? (this.night ? 5 : 4) : this.night ? 1.1 : 0.35;
+    // Values are HDR: anything above the bloom threshold (~1) glows. By day the lamps read as lit
+    // DRLs but stay under the threshold, otherwise every car carries a bloom blob in sunlight.
+    // Tail lights stay moderate because ACES desaturates very bright reds towards salmon.
+    this.head.emissiveIntensity = this.night ? 3.2 : 0.55;
+    // Red luminance is ~0.21 × intensity, so braking needs ~15 to clear the daytime bloom threshold.
+    this.tail.emissiveIntensity = this.braking ? (this.night ? 7 : 16) : this.night ? 1.1 : 0.35;
   }
 }
 

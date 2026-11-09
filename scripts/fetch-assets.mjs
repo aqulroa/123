@@ -50,6 +50,12 @@ const ASSETS = [
     urls: ['https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/shanghai_bund_2k.hdr'],
     minBytes: 1_000_000,
   },
+  {
+    id: 'hdri-day',
+    out: 'public/assets/hdri/day_highway.hdr',
+    urls: ['https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_48d_partly_cloudy_puresky_2k.hdr'],
+    minBytes: 1_000_000,
+  },
 ];
 
 async function exists(path, minBytes) {

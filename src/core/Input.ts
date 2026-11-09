@@ -14,6 +14,7 @@ const KEYMAP: Record<string, Action> = {
 /** Held driving keys plus one-shot handlers for menu-style keys. */
 export class Input {
   private held = new Set<Action>();
+  private touch = new Set<Action>();
   private keyHandlers = new Map<string, () => void>();
 
   constructor(target: Window = window) {
@@ -33,12 +34,18 @@ export class Input {
   }
 
   isDown(action: Action): boolean {
-    return this.held.has(action);
+    return this.held.has(action) || this.touch.has(action);
   }
 
-  /** Digital steering as an axis: -1 left, +1 right (touch input will feed analog values). */
+  /** On-screen pedals and steering buttons. */
+  setTouch(action: Action, down: boolean): void {
+    if (down) this.touch.add(action);
+    else this.touch.delete(action);
+  }
+
+  /** Digital steering as an axis: -1 left, +1 right. */
   get steer(): number {
-    return (this.held.has('right') ? 1 : 0) - (this.held.has('left') ? 1 : 0);
+    return (this.isDown('right') ? 1 : 0) - (this.isDown('left') ? 1 : 0);
   }
 
   onKey(code: string, handler: () => void): void {

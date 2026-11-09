@@ -97,9 +97,12 @@ export class PostFX {
 
   applyPreset(preset: LightingPreset): void {
     const night = preset === 'night';
-    this.bloom.strength = night ? 0.32 : 0.25;
-    this.bloom.radius = night ? 0.45 : 0.5;
-    this.bloom.threshold = night ? 1.0 : 0.95;
+    // Bloom runs on scene-linear HDR before exposure. By day sunlit asphalt, paint and
+    // markings reach 2–4, so a low threshold veils the whole frame; only true light
+    // sources (sun glints, brake lights, indicators, lamps) should cross it.
+    this.bloom.strength = night ? 0.24 : 0.22;
+    this.bloom.radius = night ? 0.4 : 0.45;
+    this.bloom.threshold = night ? 1.7 : preset === 'day' ? 3.6 : 3.0;
     this.cinematic.uniforms.uVignette.value = night ? 0.45 : 0.35;
   }
 

@@ -145,7 +145,7 @@ export class Materials {
       m.color.setScalar(night ? 0.75 : 0.95);
       m.needsUpdate = true;
     }
-    this.lampLens.emissiveIntensity = night ? 6 : 0;
+    this.lampLens.emissiveIntensity = night ? 3.5 : 0;
     for (const m of this.facades) m.emissiveIntensity = night ? 2.6 : 0.08;
     this.signGlow = night ? 0.35 : 0.04;
     for (const m of [...this.signs.values(), ...this.plates.values()]) m.emissiveIntensity = this.signGlow;

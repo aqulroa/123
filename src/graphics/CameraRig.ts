@@ -52,6 +52,14 @@ export class CameraRig {
     this.mode = this.mode === 'chase' ? 'bumper' : 'chase';
   }
 
+  /** Slow orbit around the car behind the main menu. */
+  showcase = false;
+
+  /** Replays the crane shot into the chase position (run start). */
+  restartIntro(): void {
+    this.introT = 0;
+  }
+
   /** Kick the camera, e.g. on a barrier hit (m/s of impact). */
   bump(strength: number): void {
     this.shake = Math.min(1, this.shake + strength * 0.08);
@@ -93,7 +101,15 @@ export class CameraRig {
 
     // Intro: crane from high off the front quarter down into the chase position.
     const e = 1 - Math.pow(1 - this.introT, 3);
-    if (e < 1) {
+    if (this.showcase) {
+      // Sweeps rear ↔ side three-quarters, always looking down the road: the HDRIs are
+      // framed for that direction (the night one has a lit promenade behind the camera).
+      const a = Math.PI + Math.sin(this.time * 0.09) * 1.75;
+      const r = 6.2 + t.length * 0.35;
+      this.pos.set(t.x + Math.sin(a) * r, 1.25 + Math.sin(this.time * 0.21) * 0.35, z - Math.cos(a) * r * 0.9 - 1.0);
+      this.look.set(t.x, 0.75, z - 0.6);
+      this.introT = 0;
+    } else if (e < 1) {
       this.crane.set(t.x + 9, 7.5, z - 16);
       this.pos.lerpVectors(this.crane, this.pos, e);
       this.look.lerpVectors(new THREE.Vector3(t.x, 0.7, z), this.look, e);

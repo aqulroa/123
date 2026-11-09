@@ -39,7 +39,8 @@ export class GameLoop {
     this.rafId = requestAnimationFrame(this.tick);
 
     // Clamp so a background tab or GC pause never explodes the simulation.
-    const dt = Math.min((now - this.last) / 1000, 0.1);
+    // The first rAF timestamp can precede start(), so clamp below too.
+    const dt = Math.min(Math.max((now - this.last) / 1000, 0), 0.1);
     this.last = now;
 
     this.fpsFrames++;

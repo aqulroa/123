@@ -15,7 +15,7 @@ export const TRAFFIC_TYPES: TrafficType[] = TRAFFIC_CARS.map((t) => ({
 
 const BLINK_GEO = new THREE.BoxGeometry(0.17, 0.08, 0.05);
 // HDR amber: well above the bloom threshold so indicators glow like real bulbs.
-const BLINK_ON = new THREE.Color(7, 2.6, 0.2);
+const BLINK_ON = new THREE.Color(9, 3.6, 0.3);
 
 class Pooled {
   readonly blinkL: THREE.MeshBasicMaterial;

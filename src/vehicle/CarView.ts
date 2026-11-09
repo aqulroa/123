@@ -48,7 +48,7 @@ export class CarView {
 
   setNight(on: boolean): void {
     this.model.materials.lights.setNight(on);
-    this.beam.intensity = on ? 380 : 0;
+    this.beam.intensity = on ? 240 : 0;
   }
 
   update(dt: number, car: PlayerCar, origin: number): void {

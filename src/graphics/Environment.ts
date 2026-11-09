@@ -22,6 +22,8 @@ interface PresetConfig {
   /** Target luminance of the fog colour (hue still comes from the HDRI horizon). */
   fogLuminance: number;
   fogTint: THREE.Color;
+  /** HDRI luminance cap: keeps sun discs and lit promenades from veiling the frame in bloom. */
+  maxRadiance: number;
   /** Procedural sky used only when the HDRI file is missing. */
   fallbackSky: { elevation: number; azimuth: number; turbidity: number; rayleigh: number };
 }
@@ -31,7 +33,7 @@ const PRESETS: Record<LightingPreset, PresetConfig> = {
     hdri: 'assets/hdri/golden_hour.hdr',
     exposure: 0.74,
     envIntensity: 1.0,
-    backgroundIntensity: 1.0,
+    backgroundIntensity: 0.6,
     backgroundBlurriness: 0.0,
     detectSun: true,
     // Sun low and ahead-left: long shadows across the lanes, backlit glare.
@@ -44,7 +46,28 @@ const PRESETS: Record<LightingPreset, PresetConfig> = {
     fogDensity: 0.0007,
     fogLuminance: 0.3,
     fogTint: new THREE.Color(1.0, 0.92, 0.85),
+    maxRadiance: 40,
     fallbackSky: { elevation: 4, azimuth: 215, turbidity: 8, rayleigh: 2.2 },
+  },
+  day: {
+    hdri: 'assets/hdri/day_highway.hdr',
+    exposure: 0.62,
+    envIntensity: 0.9,
+    backgroundIntensity: 0.7,
+    backgroundBlurriness: 0.0,
+    detectSun: true,
+    // High sun behind-right: crisp short shadows, no glare straight down the road.
+    sunYaw: Math.atan2(0.6, 0.8),
+    lightDir: new THREE.Vector3(0.4, 0.8, 0.45),
+    envRotation: 0,
+    sunColor: new THREE.Color(1.0, 0.96, 0.9),
+    sunIntensity: 3.2,
+    minSunElevation: THREE.MathUtils.degToRad(25),
+    fogDensity: 0.0005,
+    fogLuminance: 0.45,
+    fogTint: new THREE.Color(0.9, 0.95, 1.05),
+    maxRadiance: 40,
+    fallbackSky: { elevation: 45, azimuth: 150, turbidity: 4, rayleigh: 1.2 },
   },
   night: {
     hdri: 'assets/hdri/night_city.hdr',
@@ -64,6 +87,7 @@ const PRESETS: Record<LightingPreset, PresetConfig> = {
     fogDensity: 0.0012,
     fogLuminance: 0.012,
     fogTint: new THREE.Color(0.8, 0.85, 1.0),
+    maxRadiance: 4,
     fallbackSky: { elevation: -2, azimuth: 180, turbidity: 2, rayleigh: 0.3 },
   },
 };
@@ -129,6 +153,7 @@ export class Environment {
         .then((tex): LoadedEnv => {
           tex.mapping = THREE.EquirectangularReflectionMapping;
           const { sunDir, horizon } = analyseHdri(tex);
+          clampHdri(tex, cfg.maxRadiance);
           return { texture: tex, sky: null, sunDir, horizon };
         })
         .catch((err): LoadedEnv => {
@@ -244,6 +269,32 @@ const _basis = new THREE.Matrix4();
 const _inv = new THREE.Matrix4();
 const _tmp = new THREE.Vector3();
 const _zero = new THREE.Vector3();
+
+/**
+ * Caps texel luminance (keeping hue). A raw sun disc is thousands of units bright:
+ * it blooms into a white veil and double-lights the scene on top of the
+ * directional sun, which already carries that energy.
+ */
+function clampHdri(tex: THREE.Texture, maxLum: number): void {
+  const img = tex.image as { data: Uint16Array | Float32Array; width: number; height: number };
+  const { data, width: w, height: h } = img;
+  const half = tex.type === THREE.HalfFloatType;
+  const ch = data.length / (w * h);
+  const read = (i: number) => (half ? THREE.DataUtils.fromHalfFloat(data[i]) : data[i]);
+  const write = (i: number, v: number) => (data[i] = half ? THREE.DataUtils.toHalfFloat(v) : v);
+  for (let i = 0; i < data.length; i += ch) {
+    const r = read(i);
+    const g = read(i + 1);
+    const b = read(i + 2);
+    const lum = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    if (lum <= maxLum) continue;
+    const k = maxLum / lum;
+    write(i, r * k);
+    write(i + 1, g * k);
+    write(i + 2, b * k);
+  }
+  tex.needsUpdate = true;
+}
 
 /**
  * Finds the sun (brightest texel in the upper hemisphere) and the average

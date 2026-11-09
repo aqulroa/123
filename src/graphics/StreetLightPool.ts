@@ -48,7 +48,7 @@ export class StreetLightPool {
       light.target.updateMatrixWorld();
       const ahead = lamp.z - s;
       const fade = THREE.MathUtils.smoothstep(this.reach, this.reach - 80, ahead);
-      light.intensity = 260 * fade;
+      light.intensity = 190 * fade;
     });
   }
 }

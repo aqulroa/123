@@ -19,7 +19,7 @@ export class EventBus<Events extends Record<string, unknown>> {
   }
 }
 
-export type LightingPreset = 'golden' | 'night';
+export type LightingPreset = 'golden' | 'day' | 'night';
 
 export interface GameEvents extends Record<string, unknown> {
   'preset:changed': LightingPreset;
