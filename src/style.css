@@ -1,0 +1,137 @@
+:root {
+  --accent: #ff4d2e;
+  --ink: #f4f1ea;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #07080a;
+  color: var(--ink);
+  font-family: 'Segoe UI', 'Roboto', system-ui, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+#app canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+.loader {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 22px;
+  background: radial-gradient(ellipse at 50% 60%, #1b1512 0%, #07080a 70%);
+  z-index: 10;
+  transition: opacity 0.8s ease;
+}
+
+.loader--done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.loader__title {
+  font-size: clamp(28px, 6vw, 64px);
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  text-align: center;
+  line-height: 1;
+}
+
+.loader__title span {
+  display: block;
+  color: var(--accent);
+  font-size: 0.55em;
+  letter-spacing: 0.5em;
+  margin-top: 8px;
+}
+
+.loader__track {
+  width: min(420px, 70vw);
+  height: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.loader__bar {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #ff9b3d, var(--accent));
+  box-shadow: 0 0 12px var(--accent);
+  transition: width 0.4s ease;
+}
+
+.loader__label {
+  text-align: center;
+  font-size: 13px;
+  opacity: 0.7;
+  letter-spacing: 0.08em;
+}
+
+.hud {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+.hud__speed {
+  position: absolute;
+  right: 36px;
+  bottom: 28px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.hud__speed b {
+  font-size: 72px;
+  font-weight: 900;
+  font-style: italic;
+  font-variant-numeric: tabular-nums;
+}
+
+.hud__speed small {
+  font-size: 16px;
+  opacity: 0.75;
+}
+
+.hud__info {
+  position: absolute;
+  left: 24px;
+  top: 20px;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+.hud__keys {
+  position: absolute;
+  left: 24px;
+  bottom: 24px;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+.fatal {
+  position: fixed;
+  inset: auto 20px 20px;
+  padding: 14px 18px;
+  background: #3a0d0d;
+  border: 1px solid #a33;
+  z-index: 20;
+}

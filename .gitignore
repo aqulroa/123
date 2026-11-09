@@ -1,0 +1,6 @@
+node_modules/
+dist/
+# Downloaded by `npm run fetch-assets` (CC0, re-fetched on demand)
+public/assets/hdri/*.hdr
+*.log
+.DS_Store
