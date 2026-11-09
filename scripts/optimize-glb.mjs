@@ -63,7 +63,7 @@ export async function optimizeGlb(input, output, { maxTris = 120_000, texSize = 
   return { before, after: triangleCount(doc) };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [input, output, maxTris, texSize] = process.argv.slice(2);
   if (!input || !output) {
     console.error('usage: optimize-glb.mjs <in> <out.glb> [maxTris] [texSize]');

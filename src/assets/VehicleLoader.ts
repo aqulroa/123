@@ -335,6 +335,198 @@ function splitByQuadrant(m: THREE.Mesh, toModel: THREE.Matrix4, cx: number, cz: 
   });
 }
 
+/** Marks synthetic wheel meshes cut out of a body mesh (their materials are kept as authored). */
+const GEOM_WHEEL = '#geomwheel';
+
+const boxCache = new WeakMap<THREE.BufferGeometry, THREE.Box3>();
+
+/**
+ * Bounds of the vertices actually referenced by the index. Split meshes share
+ * their parent's vertex buffer, so `computeBoundingBox()` would return the
+ * whole car for every wheel.
+ */
+function geomBox(geo: THREE.BufferGeometry): THREE.Box3 {
+  let b = boxCache.get(geo);
+  if (b) return b;
+  const pos = geo.getAttribute('position');
+  const index = geo.getIndex();
+  b = new THREE.Box3();
+  if (index) {
+    const v = new THREE.Vector3();
+    for (let i = 0; i < index.count; i++) b.expandByPoint(v.fromBufferAttribute(pos, index.getX(i)));
+  } else {
+    b.setFromBufferAttribute(pos as THREE.BufferAttribute);
+  }
+  boxCache.set(geo, b);
+  geo.boundingBox = b.clone();
+  return b;
+}
+
+function reorient(list: TriInfo[] | null, orient: THREE.Matrix4): TriInfo[] | null {
+  list?.forEach((t) => t.centroid.applyMatrix4(orient));
+  return list;
+}
+
+/** Splits a mesh by a per-triangle key (-1 = drop), keeping material groups. Shares vertex buffers. */
+function partitionMesh(m: THREE.Mesh, keyOf: (tri: number) => number): Map<number, THREE.Mesh> {
+  const geo = m.geometry;
+  const index = geo.getIndex();
+  const triCount = (index ? index.count : geo.getAttribute('position').count) / 3;
+  const groups = geo.groups.length ? geo.groups : [{ start: 0, count: triCount * 3, materialIndex: 0 }];
+  const out = new Map<number, { idx: number[]; groups: { start: number; count: number; materialIndex: number }[] }>();
+  for (const g of groups) {
+    const per = new Map<number, number[]>();
+    for (let t = g.start / 3; t < (g.start + g.count) / 3; t++) {
+      const k = keyOf(t);
+      let list = per.get(k);
+      if (!list) per.set(k, (list = []));
+      for (let j = 0; j < 3; j++) list.push(index ? index.getX(t * 3 + j) : t * 3 + j);
+    }
+    for (const [k, list] of per) {
+      let e = out.get(k);
+      if (!e) out.set(k, (e = { idx: [], groups: [] }));
+      e.groups.push({ start: e.idx.length, count: list.length, materialIndex: g.materialIndex ?? 0 });
+      e.idx.push(...list);
+    }
+  }
+  const meshes = new Map<number, THREE.Mesh>();
+  for (const [k, { idx, groups: gs }] of out) {
+    const sub = new THREE.BufferGeometry();
+    for (const [name, attr] of Object.entries(geo.attributes)) sub.setAttribute(name, attr);
+    sub.setIndex(idx);
+    if (geo.groups.length) gs.forEach((g) => sub.addGroup(g.start, g.count, g.materialIndex));
+    const mesh = new THREE.Mesh(sub, m.material);
+    mesh.name = m.name;
+    meshes.set(k, mesh);
+  }
+  return meshes;
+}
+
+interface Component {
+  mesh: THREE.Mesh;
+  tris: number[];
+  box: THREE.Box3;
+}
+
+/** Connected triangle islands of a mesh (vertices welded by position), with model-space bounds. */
+function components(m: THREE.Mesh, toModel: THREE.Matrix4): Component[] {
+  const geo = m.geometry;
+  const pos = geo.getAttribute('position');
+  const index = geo.getIndex();
+  const triCount = (index ? index.count : pos.count) / 3;
+  if (triCount > 400_000) return [];
+  geo.computeBoundingBox();
+  const size = geo.boundingBox!.getSize(new THREE.Vector3());
+  const q = Math.max(size.x, size.y, size.z) * 1e-5 || 1e-6;
+  const ids = new Map<string, number>();
+  const vid = new Int32Array(pos.count);
+  for (let i = 0; i < pos.count; i++) {
+    const key = `${Math.round(pos.getX(i) / q)},${Math.round(pos.getY(i) / q)},${Math.round(pos.getZ(i) / q)}`;
+    let id = ids.get(key);
+    if (id === undefined) ids.set(key, (id = ids.size));
+    vid[i] = id;
+  }
+  const parent = new Int32Array(ids.size).map((_, i) => i);
+  const find = (a: number): number => {
+    while (parent[a] !== a) a = parent[a] = parent[parent[a]];
+    return a;
+  };
+  const vert = (t: number, j: number) => vid[index ? index.getX(t * 3 + j) : t * 3 + j];
+  for (let t = 0; t < triCount; t++) {
+    const a = find(vert(t, 0));
+    parent[find(vert(t, 1))] = a;
+    parent[find(vert(t, 2))] = a;
+  }
+  const byRoot = new Map<number, number[]>();
+  for (let t = 0; t < triCount; t++) {
+    const r = find(vert(t, 0));
+    let list = byRoot.get(r);
+    if (!list) byRoot.set(r, (list = []));
+    list.push(t);
+  }
+  const v = new THREE.Vector3();
+  const out: Component[] = [];
+  for (const tris of byRoot.values()) {
+    if (tris.length < 4) continue;
+    const box = new THREE.Box3();
+    for (const t of tris) {
+      for (let j = 0; j < 3; j++) box.expandByPoint(v.fromBufferAttribute(pos, index ? index.getX(t * 3 + j) : t * 3 + j).applyMatrix4(toModel));
+    }
+    out.push({ mesh: m, tris, box });
+  }
+  return out;
+}
+
+/**
+ * Finds four wheels baked into body meshes: per corner, the largest round
+ * island touching the ground is the tyre; islands inside its disc (rim, hub,
+ * brake) join it. Returns null unless all four corners agree.
+ */
+function extractWheelsByGeometry(
+  bodyMeshes: THREE.Mesh[],
+  model: Map<THREE.Mesh, THREE.Matrix4>,
+  preBox: THREE.Box3,
+): { replaced: Map<THREE.Mesh, THREE.Mesh | null>; wheels: { mesh: THREE.Mesh; matrix: THREE.Matrix4 }[][] } | null {
+  const P = preBox.getSize(new THREE.Vector3());
+  const Pc = preBox.getCenter(new THREE.Vector3());
+  const all: Component[] = bodyMeshes.flatMap((m) => components(m, model.get(m)!));
+  const quad = (c: THREE.Vector3) => (c.x > Pc.x ? 1 : 0) + (c.z > Pc.z ? 2 : 0);
+  const cand = all.filter((k) => {
+    const c = k.box.getCenter(new THREE.Vector3());
+    const s = k.box.getSize(new THREE.Vector3());
+    return Math.abs(c.x - Pc.x) > 0.22 * P.x && Math.abs(c.z - Pc.z) > 0.18 * P.z && c.y < preBox.min.y + 0.42 * P.y && s.y < 0.6 * P.y && s.x < 0.3 * P.x;
+  });
+
+  const anchors: (Component | null)[] = [null, null, null, null];
+  for (const k of cand) {
+    const s = k.box.getSize(new THREE.Vector3());
+    const round = s.y / s.z > 0.75 && s.y / s.z < 1.33;
+    const grounded = k.box.min.y < preBox.min.y + 0.08 * P.y;
+    if (!round || !grounded || s.y < 0.18 * P.y) continue;
+    const q = quad(k.box.getCenter(new THREE.Vector3()));
+    const cur = anchors[q];
+    if (!cur || s.y > cur.box.max.y - cur.box.min.y) anchors[q] = k;
+  }
+  if (anchors.some((a) => !a)) return null;
+  const radii = anchors.map((a) => (a!.box.max.y - a!.box.min.y) / 2);
+  const rMed = [...radii].sort((a, b) => a - b)[1];
+  if (radii.some((r) => Math.abs(r - rMed) > 0.25 * rMed)) return null;
+
+  // Assign islands to wheel quadrants.
+  const assign = new Map<THREE.Mesh, Map<number, number>>();
+  const mark = (k: Component, q: number) => {
+    let per = assign.get(k.mesh);
+    if (!per) assign.set(k.mesh, (per = new Map()));
+    for (const t of k.tris) per.set(t, q);
+  };
+  anchors.forEach((a, q) => {
+    const C = a!.box.getCenter(new THREE.Vector3());
+    const R = radii[q] * 1.08;
+    const halfW = Math.max((a!.box.max.x - a!.box.min.x) / 2, 0.06 * P.x);
+    for (const k of cand) {
+      if (k === a || quad(k.box.getCenter(new THREE.Vector3())) !== q) continue;
+      const b = k.box;
+      const inside = b.min.y >= C.y - R && b.max.y <= C.y + R && b.min.z >= C.z - R && b.max.z <= C.z + R;
+      if (inside && Math.abs((b.min.x + b.max.x) / 2 - C.x) < halfW * 1.6) mark(k, q);
+    }
+    mark(a!, q);
+  });
+
+  const replaced = new Map<THREE.Mesh, THREE.Mesh | null>();
+  const wheels: { mesh: THREE.Mesh; matrix: THREE.Matrix4 }[][] = [[], [], [], []];
+  for (const [src, per] of assign) {
+    const parts = partitionMesh(src, (t) => per.get(t) ?? -1);
+    const chain = `${chainOverride.get(src) ?? src.name} ${GEOM_WHEEL}`;
+    for (const [k, mesh] of parts) {
+      if (k < 0) continue;
+      chainOverride.set(mesh, chain);
+      wheels[k].push({ mesh, matrix: model.get(src)! });
+    }
+    replaced.set(src, parts.get(-1) ?? null);
+  }
+  return { replaced, wheels };
+}
+
 function triangleArea(geo: THREE.BufferGeometry, toModel: THREE.Matrix4, start: number, count: number, out: { area: number; yMax: number; yMin: number }): void {
   const pos = geo.getAttribute('position');
   const index = geo.getIndex();
@@ -499,10 +691,7 @@ function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean; flip: boole
   for (const m of meshes) model.set(m, orient.clone().multiply(m.matrixWorld));
   for (const list of tris.values()) list?.forEach((t) => t.centroid.applyMatrix4(orient));
 
-  const boxOf = (m: THREE.Mesh) => {
-    m.geometry.computeBoundingBox();
-    return m.geometry.boundingBox!.clone().applyMatrix4(model.get(m)!);
-  };
+  const boxOf = (m: THREE.Mesh) => geomBox(m.geometry).clone().applyMatrix4(model.get(m)!);
   const preBox = new THREE.Box3();
   meshes.forEach((m) => preBox.union(boxOf(m)));
   const preSize = preBox.getSize(new THREE.Vector3());
@@ -556,6 +745,36 @@ function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean; flip: boole
   });
   for (const k of clusters) if (!wheelUnits.includes(k)) bodyMeshes.push(...k.meshes);
   if (wheelUnits.length < 2) bodyMeshes.push(...wheelUnits.splice(0).flatMap((k) => k.meshes));
+
+  // No named wheels: many exports bake the wheels into the body mesh. Cut them
+  // out geometrically so they can still spin and steer.
+  if (wheelUnits.length < 2) {
+    const found = extractWheelsByGeometry(bodyMeshes, model, preBox);
+    if (found) {
+      for (const [src, rest] of found.replaced) {
+        const i = bodyMeshes.indexOf(src);
+        if (rest) bodyMeshes.splice(i, 1, rest);
+        else bodyMeshes.splice(i, 1);
+        meshes = meshes.filter((x) => x !== src);
+        if (rest) {
+          model.set(rest, model.get(src)!);
+          meshes.push(rest);
+          const list = tris.get(src);
+          tris.set(rest, list ? reorient(sampleTriangles(rest, src.matrixWorld), orient) : null);
+        }
+      }
+      for (const unit of found.wheels) {
+        for (const w of unit) {
+          model.set(w.mesh, w.matrix);
+          tris.set(w.mesh, null);
+          meshes.push(w.mesh);
+        }
+        const box = new THREE.Box3();
+        unit.forEach((w) => box.union(boxOf(w.mesh)));
+        wheelUnits.push({ box, meshes: unit.map((w) => w.mesh) });
+      }
+    }
+  }
 
   const fullBox = new THREE.Box3();
   meshes.forEach((m) => fullBox.union(boxOf(m)));
@@ -701,7 +920,8 @@ function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean; flip: boole
           if (c === 'tire') return 'tire';
           // Brakes, nuts, logos on the hub: keep the author's materials.
           if (/brake|caliper|disc|nut|bolt|logo/i.test(`${chain} ${mat.name}`)) return 'keep';
-          return c === 'rim' || c === null ? 'rim' : 'keep';
+          // Wheels cut out of a body keep their authored (often textured) materials.
+          return c === 'rim' || (c === null && !chain.includes(GEOM_WHEEL)) ? 'rim' : 'keep';
         }
         return matClass.get(mat) ?? 'keep';
       });
@@ -712,6 +932,21 @@ function analyse(scene: THREE.Object3D, opts: { hideBadges: boolean; flip: boole
     }
     return { geometry, matrix, classes, originals, fixed: wheel && /caliper/i.test(chain) };
   };
+
+  // A rig needs wheels on both axles and both sides; anything less renders them as body.
+  {
+    const centres = wheelUnits.map((k) => k.box.getCenter(new THREE.Vector3()));
+    const zs = centres.map((c) => c.z);
+    const xs = centres.map((c) => c.x);
+    const L = fullBox.max.z - fullBox.min.z;
+    const W = fullBox.max.x - fullBox.min.x;
+    const ok =
+      wheelUnits.length >= 4 && Math.max(...zs) - Math.min(...zs) > 0.35 * L && Math.max(...xs) - Math.min(...xs) > 0.4 * W;
+    if (!ok && wheelUnits.length) {
+      bodyMeshes.push(...wheelUnits.flatMap((k) => k.meshes));
+      wheelUnits.length = 0;
+    }
+  }
 
   const body = bodyMeshes.map((m) => makePart(m, false, model.get(m)!));
   const wheels: WheelTemplate[] = wheelUnits.map((k) => {
