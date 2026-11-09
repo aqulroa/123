@@ -127,6 +127,38 @@ body {
   opacity: 0.6;
 }
 
+.hud__car {
+  position: absolute;
+  right: 36px;
+  top: 20px;
+  text-align: right;
+}
+
+.hud__car b {
+  display: block;
+  font-size: 26px;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+
+.hud__car small {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  opacity: 0.75;
+}
+
+.hud__car--in {
+  animation: car-in 0.5s ease-out;
+}
+
+@keyframes car-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
 .fatal {
   position: fixed;
   inset: auto 20px 20px;

@@ -7,7 +7,7 @@
  *   node scripts/fetch-assets.mjs --force   re-download everything
  *   node scripts/fetch-assets.mjs --soft    never fail the calling npm script
  */
-import { mkdir, stat, writeFile, rename } from 'node:fs/promises';
+import { copyFile, mkdir, stat, writeFile, rename } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,8 +15,28 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const force = process.argv.includes('--force');
 const soft = process.argv.includes('--soft');
 
-/** Poly Haven HDRIs are CC0. Step 2 appends the .glb vehicle list here. */
+/**
+ * Kenney Car Kit (CC0) mirrored on GitHub, pinned to a commit so the files
+ * never change underneath the material classifier.
+ */
+const KENNEY = 'https://raw.githubusercontent.com/shorepine/kenney/3694c6879e487c108f55677be7dd2ca75b07cc3b/3d/car';
+const KENNEY_MODELS = ['sedan', 'sedan-sports', 'hatchback-sports', 'suv', 'suv-luxury', 'taxi', 'police', 'van', 'truck', 'delivery'];
+
+/** Poly Haven HDRIs and Kenney vehicles are CC0; see CREDITS.md. */
 const ASSETS = [
+  ...KENNEY_MODELS.map((name) => ({
+    id: `vehicle-${name}`,
+    out: `public/assets/vehicles/kenney/${name}.glb`,
+    urls: [`${KENNEY}/${name}.glb`],
+    minBytes: 50_000,
+  })),
+  {
+    // The .glb files reference this palette by relative URI.
+    id: 'vehicle-palette',
+    out: 'public/assets/vehicles/kenney/Textures/colormap.png',
+    urls: [`${KENNEY}/Textures/colormap.png`],
+    minBytes: 5_000,
+  },
   {
     id: 'hdri-golden',
     out: 'public/assets/hdri/golden_hour.hdr',
@@ -77,6 +97,19 @@ for (const asset of ASSETS) {
     }
   }
   if (!ok) failures++;
+}
+
+// Draco decoder for compressed drop-in models (public/assets/vehicles/custom/*.glb).
+const dracoSrc = join(root, 'node_modules/three/examples/jsm/libs/draco/gltf');
+const dracoOut = join(root, 'public/assets/draco');
+try {
+  await mkdir(dracoOut, { recursive: true });
+  for (const f of ['draco_decoder.js', 'draco_decoder.wasm', 'draco_wasm_wrapper.js']) {
+    await copyFile(join(dracoSrc, f), join(dracoOut, f));
+  }
+  console.log('✓ draco decoder');
+} catch (err) {
+  console.warn(`! draco decoder not copied (${err.message}); compressed custom models won't load.`);
 }
 
 if (failures) {

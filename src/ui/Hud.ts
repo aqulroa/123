@@ -8,7 +8,7 @@ export interface HudState {
   pocketInfo: string;
 }
 
-/** DOM overlay: loading screen, speed readout and controls hint. */
+/** DOM overlay: loading screen, speed readout, car badge and controls hint. */
 export class Hud {
   private root: HTMLElement;
   private loader: HTMLElement;
@@ -16,6 +16,7 @@ export class Hud {
   private loaderLabel: HTMLElement;
   private speed: HTMLElement;
   private info: HTMLElement;
+  private car: HTMLElement;
   private visible = true;
 
   constructor(parent: HTMLElement) {
@@ -27,9 +28,10 @@ export class Hud {
          <div class="loader__label">Загрузка…</div>
        </div>
        <div class="hud" id="hud">
+         <div class="hud__car"><b></b><small></small></div>
          <div class="hud__speed"><b>0</b><small>км/ч</small></div>
          <div class="hud__info"></div>
-         <div class="hud__keys">W/S — газ/тормоз · A/D — перестроение · N — день/ночь · H — HUD</div>
+         <div class="hud__keys">W/S — газ/тормоз · A/D — руль · 1–5 — машина · C — камера · N — день/ночь · H — HUD</div>
        </div>`,
     );
     this.loader = parent.querySelector('#loader')!;
@@ -38,6 +40,7 @@ export class Hud {
     this.root = parent.querySelector('#hud')!;
     this.speed = this.root.querySelector('.hud__speed b')!;
     this.info = this.root.querySelector('.hud__info')!;
+    this.car = this.root.querySelector('.hud__car')!;
   }
 
   progress(label: string, value: number): void {
@@ -53,6 +56,15 @@ export class Hud {
   toggle(): void {
     this.visible = !this.visible;
     this.root.style.display = this.visible ? '' : 'none';
+  }
+
+  setCar(name: string, tagline: string): void {
+    this.car.querySelector('b')!.textContent = name;
+    this.car.querySelector('small')!.textContent = tagline;
+    // Restart the slide-in animation.
+    this.car.classList.remove('hud__car--in');
+    void this.car.offsetWidth;
+    this.car.classList.add('hud__car--in');
   }
 
   update(s: HudState): void {

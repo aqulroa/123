@@ -1,5 +1,7 @@
 import * as THREE from 'three';
-import { CHUNK_LENGTH } from './config';
+import { KMH } from './config';
+import { PLAYER_CARS, findPlayerCar, type VehicleSpec } from './assets/vehicles';
+import { VehicleLoader } from './assets/VehicleLoader';
 import { events, type LightingPreset } from './core/EventBus';
 import { GameLoop } from './core/GameLoop';
 import { Input } from './core/Input';
@@ -11,7 +13,8 @@ import { Scenery } from './graphics/Scenery';
 import { StreetLightPool } from './graphics/StreetLightPool';
 import { RoadStreamer } from './road/RoadStreamer';
 import { Hud } from './ui/Hud';
-import { PreviewDriver } from './vehicle/PreviewDriver';
+import { CarView } from './vehicle/CarView';
+import { PlayerCar } from './vehicle/PlayerCar';
 
 /**
  * Floating origin step. Everything road-related lives under `world`, whose
@@ -24,7 +27,7 @@ const LANE_LABELS: Record<number, string> = { [-1]: 'Карман слева', 0
 
 async function boot(): Promise<void> {
   const app = document.getElementById('app')!;
-  // ?preset=night, ?intro=0 (skip crane shot), ?s=<meters> (start offset)
+  // ?preset=night, ?intro=0 (skip crane shot), ?s=<meters> (start offset), ?car=<id>, ?cam=bumper
   const params = new URLSearchParams(location.search);
   const hud = new Hud(document.body);
   events.on('loading:progress', ({ label, progress }) => hud.progress(label, progress));
@@ -59,23 +62,32 @@ async function boot(): Promise<void> {
   await step('Генерация асфальта и материалов…', 0.1);
   const mats = new Materials(renderer.capabilities.getMaxAnisotropy(), mobile);
 
-  await step('Загрузка HDRI-окружения…', 0.35);
+  await step('Загрузка HDRI и автомобилей…', 0.3);
   const env = new Environment(renderer, scene, mobile);
   const envReady = env.preloadAll();
+  const loader = new VehicleLoader();
+  let spec: VehicleSpec = findPlayerCar(params.get('car'));
+  const viewReady = CarView.create(loader, spec);
 
   await step('Процедурная трасса…', 0.55);
   const road = new RoadStreamer(world, mats);
   road.prime(0);
   const scenery = new Scenery(scene, world, mats, mobile);
-  // 4 real lights: more makes the clear-coat road shader too heavy (it stopped rasterising under SwiftShader at 8).
+  // 4 street lamps + the player's beam: more makes the clear-coat road shader too heavy
+  // (it stopped rasterising under SwiftShader at 8 spot lights).
   const lights = new StreetLightPool(scene, road, 4);
 
   const rig = new CameraRig(innerWidth / innerHeight, params.get('intro') === '0');
+  if (params.get('cam') === 'bumper') rig.toggleMode();
   const post = new PostFX(renderer, scene, rig.camera, mobile);
   post.setSize(innerWidth, innerHeight);
-
   const input = new Input();
-  const driver = new PreviewDriver(road.layout);
+
+  let view = await viewReady;
+  scene.add(view.model.root);
+  const car = new PlayerCar(road.layout, spec.handling, view.model.wheelbase, view.model.width, view.model.length);
+  car.speed = 120 * KMH;
+  hud.setCar(spec.name, spec.tagline);
 
   await envReady;
   await step('Свет и тени…', 0.85);
@@ -84,23 +96,56 @@ async function boot(): Promise<void> {
     mats.applyPreset(preset);
     post.applyPreset(preset);
     lights.setEnabled(preset === 'night');
+    view.setNight(preset === 'night');
     events.emit('preset:changed', preset);
   };
   await applyPreset(params.get('preset') === 'night' ? 'night' : 'golden');
   input.onKey('KeyN', () => void applyPreset(env.preset === 'golden' ? 'night' : 'golden'));
   input.onKey('KeyH', () => hud.toggle());
+  input.onKey('KeyC', () => rig.toggleMode());
+
+  let switching = false;
+  const switchCar = async (next: VehicleSpec) => {
+    if (switching || next.id === spec.id) return;
+    switching = true;
+    try {
+      const nextView = await CarView.create(loader, next);
+      view.dispose();
+      view = nextView;
+      spec = next;
+      scene.add(view.model.root);
+      view.setNight(env.preset === 'night');
+      car.setVehicle(spec.handling, view.model.wheelbase, view.model.width, view.model.length);
+      hud.setCar(spec.name, spec.tagline);
+    } finally {
+      switching = false;
+    }
+  };
+  PLAYER_CARS.forEach((c, i) => input.onKey(`Digit${i + 1}`, () => void switchCar(c)));
 
   // Optional start offset (?s=meters) is handy for jumping straight to a pocket.
   const startS = Number(params.get('s') ?? 0);
   if (startS > 0) {
-    driver.s = startS;
+    car.s = startS;
     origin = Math.floor(startS / ORIGIN_STEP) * ORIGIN_STEP;
     world.position.z = origin;
     road.prime(startS);
   }
 
+  const cameraTarget = () => ({
+    x: car.x,
+    s: car.s,
+    psi: car.psi,
+    speed: car.speed,
+    latAccel: car.latAccel,
+    longAccel: car.longAccel,
+    length: view.model.length,
+    height: view.model.height,
+  });
+
   // Compile every program up front so the first frames don't hitch.
-  rig.update(0.016, driver, origin);
+  view.update(0.016, car, origin);
+  rig.update(0.016, cameraTarget(), origin);
   await renderer.compileAsync(scene, rig.camera);
   await step('Готово', 1);
   hud.hideLoader();
@@ -115,39 +160,52 @@ async function boot(): Promise<void> {
   const focus = new THREE.Vector3();
   let time = 0;
   let hudTimer = 0;
+  const controls = { throttle: 0, brake: 0, steer: 0 };
 
   const loop = new GameLoop({
-    fixedUpdate: (dt) => driver.update(dt, input),
+    fixedUpdate: (dt) => {
+      // Controls stay locked until the intro crane shot lands.
+      const live = rig.introDone;
+      controls.throttle = live && input.isDown('throttle') ? 1 : 0;
+      controls.brake = live && input.isDown('brake') ? 1 : 0;
+      controls.steer = live ? input.steer : 0;
+      car.update(dt, controls);
+    },
     update: (dt) => {
       time += dt;
-      if (driver.s - origin > ORIGIN_STEP) {
+      if (car.s - origin > ORIGIN_STEP) {
         origin += ORIGIN_STEP;
         world.position.z = origin;
       }
-      road.update(driver.s);
-      rig.update(dt, driver, origin);
-      focus.copy(rig.camera.position).add(new THREE.Vector3(0, 0, -CHUNK_LENGTH * 0.25));
+      if (car.impact > 0) {
+        rig.bump(car.impact);
+        car.impact = 0;
+      }
+      road.update(car.s);
+      view.update(dt, car, origin);
+      rig.update(dt, cameraTarget(), origin);
+      focus.set(car.x, 0, -(car.s - origin) - 18);
       env.follow(focus);
-      lights.update(driver.s, origin);
-      scenery.update(rig.camera.position, driver.s);
-      post.update(rig.introDone ? driver.speed / driver.maxSpeed : 0, time);
+      lights.update(car.s, origin);
+      scenery.update(rig.camera.position, car.s);
+      post.update(rig.introDone ? car.speed / (300 * KMH) : 0, time);
 
       hudTimer -= dt;
       if (hudTimer <= 0) {
         hudTimer = 0.1;
-        const zone = road.layout.zoneAt(driver.s + 200) ?? road.layout.zoneAt(driver.s);
+        const zone = road.layout.zoneAt(car.s + 200) ?? road.layout.zoneAt(car.s);
         let pocketInfo = '';
         if (zone) {
           const side = zone.side === 1 ? 'справа' : 'слева';
-          if (driver.s < zone.start) pocketInfo = `карман ${side} через ${Math.round(zone.start - driver.s)} м`;
-          else if (driver.s < zone.fullEnd) pocketInfo = `карман ${side}, сужение через ${Math.round(zone.fullEnd - driver.s)} м`;
+          if (car.s < zone.start) pocketInfo = `карман ${side} через ${Math.round(zone.start - car.s)} м`;
+          else if (car.s < zone.fullEnd) pocketInfo = `карман ${side}, сужение через ${Math.round(zone.fullEnd - car.s)} м`;
           else pocketInfo = 'сужение';
         }
         hud.update({
-          speedKmh: driver.speedKmh,
+          speedKmh: car.speed / KMH,
           fps: loop.fps,
           preset: env.preset,
-          laneLabel: LANE_LABELS[driver.lane],
+          laneLabel: LANE_LABELS[car.laneIndex] ?? 'Обочина',
           pocketInfo,
         });
       }
@@ -157,7 +215,9 @@ async function boot(): Promise<void> {
   loop.start();
 
   // Debug handle for console tinkering and automated screenshots.
-  Object.assign(window, { __game: { renderer, scene, driver, road, env, rig, applyPreset } });
+  Object.assign(window, {
+    __game: { renderer, scene, car, road, env, rig, applyPreset, switchCar, get view() { return view; } },
+  });
 }
 
 boot().catch((err) => {

@@ -11,17 +11,15 @@ const KEYMAP: Record<string, Action> = {
   ArrowRight: 'right',
 };
 
-/** Keyboard state plus edge-triggered presses for discrete actions. */
+/** Held driving keys plus one-shot handlers for menu-style keys. */
 export class Input {
   private held = new Set<Action>();
-  private pressed = new Set<Action>();
   private keyHandlers = new Map<string, () => void>();
 
   constructor(target: Window = window) {
     target.addEventListener('keydown', (e) => {
       const action = KEYMAP[e.code];
       if (action) {
-        if (!this.held.has(action)) this.pressed.add(action);
         this.held.add(action);
         e.preventDefault();
       }
@@ -38,11 +36,9 @@ export class Input {
     return this.held.has(action);
   }
 
-  /** True once per physical key press. */
-  consume(action: Action): boolean {
-    const was = this.pressed.has(action);
-    this.pressed.delete(action);
-    return was;
+  /** Digital steering as an axis: -1 left, +1 right (touch input will feed analog values). */
+  get steer(): number {
+    return (this.held.has('right') ? 1 : 0) - (this.held.has('left') ? 1 : 0);
   }
 
   onKey(code: string, handler: () => void): void {

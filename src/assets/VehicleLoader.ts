@@ -1,0 +1,622 @@
+import * as THREE from 'three';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { CarMaterialSet, createContactShadow, type PartClass } from './CarMaterials';
+
+/**
+ * Turns an arbitrary car .glb into a game-ready rig:
+ *  1. finds wheels (by node names, clustered spatially) and the forward axis;
+ *  2. classifies every surface as paint / glass / lights / trim / tyre / rim,
+ *     either from node+material names or, for palette-atlas models such as
+ *     Kenney's, per triangle from the sampled texel colour;
+ *  3. replaces materials with the PBR set from CarMaterials;
+ *  4. rescales to real-world dimensions with the pivot on the ground between
+ *     the axles, front facing -Z.
+ * Analysis runs once per source file; instances share geometry.
+ */
+
+export interface FitSpec {
+  length: number;
+  width: number;
+  height: number;
+  wheelDiameter: number;
+  /** Paint colour, or -1 to keep the model's own livery colour. */
+  paint: number;
+  metallic: number;
+  rim: number;
+  tint: number;
+  stance?: number;
+}
+
+export interface WheelRig {
+  /** Rotates about Y for steering; positioned at the hub. */
+  steer: THREE.Object3D;
+  /** Rotates about X for rolling. */
+  spin: THREE.Object3D;
+  front: boolean;
+  left: boolean;
+  radius: number;
+}
+
+export interface VehicleModel {
+  /** Ground-level pivot between the axles; front faces -Z. */
+  root: THREE.Group;
+  /** Sprung mass: apply roll/pitch here (pivot sits at roll-centre height). */
+  body: THREE.Group;
+  wheels: WheelRig[];
+  materials: CarMaterialSet;
+  length: number;
+  width: number;
+  height: number;
+  wheelbase: number;
+  track: number;
+  wheelRadius: number;
+  /** Where the headlights sit (for the beam light), in root space. */
+  headlightPos: THREE.Vector3;
+  source: string;
+  dispose(): void;
+}
+
+interface PartTemplate {
+  geometry: THREE.BufferGeometry;
+  /** Mesh transform in oriented model space (or hub space for wheel parts). */
+  matrix: THREE.Matrix4;
+  /** Class per geometry group (or a single entry when ungrouped). */
+  classes: PartClass[];
+  originals: THREE.Material[];
+}
+
+interface WheelTemplate {
+  hub: THREE.Vector3;
+  radius: number;
+  halfWidth: number;
+  parts: PartTemplate[];
+}
+
+interface Template {
+  body: PartTemplate[];
+  wheels: WheelTemplate[];
+  box: THREE.Box3;
+  liveryColor: THREE.Color | null;
+  headlight: THREE.Vector3 | null;
+}
+
+interface TriInfo {
+  region: number;
+  color: [number, number, number];
+  centroid: THREE.Vector3;
+}
+
+// `\brim` / `rim_` so "trim" doesn't count as a wheel part.
+const WHEEL_RE = /wheel|tire|tyre|\brim|rim_|brake_?disc|caliper/i;
+const RED = (c: number[]) => c[0] > 0.55 && c[1] < 0.42 && c[2] < 0.42;
+const YELLOW = (c: number[]) => c[0] > 0.85 && c[1] > 0.65 && c[2] < 0.5;
+const lum = (c: number[]) => 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+const sat = (c: number[]) => {
+  const mx = Math.max(...c);
+  return mx > 0 ? (mx - Math.min(...c)) / mx : 0;
+};
+
+export class VehicleLoader {
+  private readonly gltf: GLTFLoader;
+  private readonly templates = new Map<string, Promise<Template | null>>();
+  private readonly base: string;
+
+  constructor(base = import.meta.env.BASE_URL) {
+    this.base = base;
+    const draco = new DRACOLoader();
+    draco.setDecoderPath(`${base}assets/draco/`);
+    this.gltf = new GLTFLoader();
+    this.gltf.setDRACOLoader(draco);
+    this.gltf.setMeshoptDecoder(MeshoptDecoder);
+  }
+
+  /** Tries each source in order; falls back to a procedural car so the game never blocks. */
+  async load(sources: string[], spec: FitSpec): Promise<VehicleModel> {
+    for (const src of sources) {
+      const template = await this.template(src);
+      if (template) return instantiate(template, spec, src);
+    }
+    console.warn(`No vehicle model available (${sources.join(', ')}); using procedural body.`);
+    return proceduralCar(spec);
+  }
+
+  private template(src: string): Promise<Template | null> {
+    let t = this.templates.get(src);
+    if (!t) {
+      t = this.gltf
+        .loadAsync(this.base + src)
+        .then((gltf) => analyse(gltf.scene))
+        .catch((err: unknown) => {
+          // Missing drop-in models are expected; anything else is worth a warning.
+          if (!src.includes('/custom/')) console.warn(`Vehicle "${src}" failed to load`, err);
+          return null;
+        });
+      this.templates.set(src, t);
+    }
+    return t;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Analysis
+
+interface Palette {
+  width: number;
+  height: number;
+  /** Swatch region id per texel. */
+  region: Int32Array;
+  /** Mean sRGB colour (0..1) per region. */
+  colors: [number, number, number][];
+}
+
+const paletteCache = new WeakMap<object, Palette | null>();
+
+/**
+ * Segments a colour-atlas texture into swatches: flood fill that follows
+ * smooth gradients but stops at hard colour edges. Returns null for photo
+ * textures (too many regions), which then fall back to name-based rules.
+ */
+function paletteOf(tex: THREE.Texture): Palette | null {
+  const img = tex.image as CanvasImageSource & { width: number; height: number };
+  if (!img || !img.width) return null;
+  if (paletteCache.has(img)) return paletteCache.get(img)!;
+  let result: Palette | null = null;
+  try {
+    const w = Math.min(img.width, 1024);
+    const h = Math.min(img.height, 1024);
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const g = c.getContext('2d', { willReadFrequently: true })!;
+    g.drawImage(img, 0, 0, w, h);
+    const px = g.getImageData(0, 0, w, h).data;
+    const region = new Int32Array(w * h).fill(-1);
+    const sums: number[][] = [];
+    const stack: number[] = [];
+    const close = (a: number, b: number) =>
+      Math.abs(px[a * 4] - px[b * 4]) <= 6 && Math.abs(px[a * 4 + 1] - px[b * 4 + 1]) <= 6 && Math.abs(px[a * 4 + 2] - px[b * 4 + 2]) <= 6;
+    for (let seed = 0; seed < w * h && sums.length <= 256; seed++) {
+      if (region[seed] >= 0) continue;
+      const id = sums.length;
+      const sum = [0, 0, 0, 0];
+      region[seed] = id;
+      stack.push(seed);
+      while (stack.length) {
+        const p = stack.pop()!;
+        sum[0] += px[p * 4];
+        sum[1] += px[p * 4 + 1];
+        sum[2] += px[p * 4 + 2];
+        sum[3]++;
+        const x = p % w;
+        const n = [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, p - w, p + w];
+        for (const q of n) {
+          if (q >= 0 && q < w * h && region[q] < 0 && close(p, q)) {
+            region[q] = id;
+            stack.push(q);
+          }
+        }
+      }
+      sums.push(sum);
+    }
+    if (sums.length <= 256) {
+      result = { width: w, height: h, region, colors: sums.map((s) => [s[0] / s[3] / 255, s[1] / s[3] / 255, s[2] / s[3] / 255]) };
+    }
+  } catch {
+    result = null;
+  }
+  paletteCache.set(img, result);
+  return result;
+}
+
+/** Per-triangle swatch region, its colour and centroid; null unless the mesh uses a palette atlas. */
+function sampleTriangles(mesh: THREE.Mesh, toModel: THREE.Matrix4): TriInfo[] | null {
+  const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+  const map = (mat as THREE.MeshStandardMaterial).map;
+  const geo = mesh.geometry;
+  const uv = geo.getAttribute('uv');
+  if (!map || !uv) return null;
+  const pal = paletteOf(map);
+  if (!pal) return null;
+  map.updateMatrix();
+  const pos = geo.getAttribute('position');
+  const index = geo.getIndex();
+  const triCount = (index ? index.count : pos.count) / 3;
+  const out: TriInfo[] = [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const t = new THREE.Vector2();
+  for (let i = 0; i < triCount; i++) {
+    const ia = index ? index.getX(i * 3) : i * 3;
+    const ib = index ? index.getX(i * 3 + 1) : i * 3 + 1;
+    const ic = index ? index.getX(i * 3 + 2) : i * 3 + 2;
+    t.set((uv.getX(ia) + uv.getX(ib) + uv.getX(ic)) / 3, (uv.getY(ia) + uv.getY(ib) + uv.getY(ic)) / 3);
+    t.applyMatrix3(map.matrix);
+    // glTF textures aren't flipped: v = 0 is the top row.
+    const x = Math.min(pal.width - 1, Math.max(0, Math.floor((((t.x % 1) + 1) % 1) * pal.width)));
+    const y = Math.min(pal.height - 1, Math.max(0, Math.floor((((t.y % 1) + 1) % 1) * pal.height)));
+    const region = pal.region[y * pal.width + x];
+    a.fromBufferAttribute(pos, ia);
+    b.fromBufferAttribute(pos, ib);
+    c.fromBufferAttribute(pos, ic);
+    const centroid = a.add(b).add(c).multiplyScalar(1 / 3).applyMatrix4(toModel).clone();
+    out.push({ region, color: pal.colors[region], centroid });
+  }
+  return out;
+}
+
+function nameChain(obj: THREE.Object3D, stop: THREE.Object3D): string {
+  const names: string[] = [];
+  for (let o: THREE.Object3D | null = obj; o && o !== stop; o = o.parent) names.push(o.name);
+  return names.join(' ');
+}
+
+function classifyByName(name: string): PartClass {
+  const n = name.toLowerCase();
+  if (/interior|cabin|seat|dash/.test(n)) return 'keep';
+  // Lamp lenses are often named "*_glass", so lights are matched before glass.
+  if (/tail|brake_?light|rear_?light|stop|lights_red/.test(n)) return 'tail';
+  if (/head|light|lamp|led|projector|drl/.test(n)) return 'head';
+  if (/glass|window|windshield|windscreen/.test(n)) return 'glass';
+  if (/chrome/.test(n)) return 'chrome';
+  if (/tire|tyre|rubber/.test(n)) return 'tire';
+  if (/\brim|wheel/.test(n)) return 'rim';
+  if (/paint|body|carpaint|car_paint|colou?r/.test(n) && !/under/.test(n)) return 'paint';
+  return 'keep';
+}
+
+function analyse(scene: THREE.Object3D): Template {
+  scene.updateMatrixWorld(true);
+  const meshes: THREE.Mesh[] = [];
+  scene.traverse((o) => {
+    if ((o as THREE.Mesh).isMesh) meshes.push(o as THREE.Mesh);
+  });
+  if (!meshes.length) throw new Error('model has no meshes');
+
+  // --- Orientation: long horizontal axis, front decided by lights.
+  const rawBox = new THREE.Box3();
+  meshes.forEach((m) => rawBox.expandByObject(m));
+  const rawSize = rawBox.getSize(new THREE.Vector3());
+  const rawCenter = rawBox.getCenter(new THREE.Vector3());
+  const longX = rawSize.x > rawSize.z;
+  const along = (v: THREE.Vector3) => (longX ? v.x - rawCenter.x : v.z - rawCenter.z);
+
+  const tris = new Map<THREE.Mesh, TriInfo[] | null>();
+  for (const m of meshes) tris.set(m, sampleTriangles(m, m.matrixWorld));
+
+  let rearScore = 0;
+  for (const m of meshes) {
+    const matName = (Array.isArray(m.material) ? m.material : [m.material]).map((x) => x.name).join(' ');
+    const cls = classifyByName(`${matName} ${nameChain(m, scene)}`);
+    const centre = new THREE.Box3().setFromObject(m).getCenter(new THREE.Vector3());
+    if (cls === 'tail') rearScore += Math.sign(along(centre));
+    if (cls === 'head') rearScore -= Math.sign(along(centre));
+    for (const t of tris.get(m) ?? []) {
+      if (RED(t.color) && Math.abs(along(t.centroid)) > 0.4 * (longX ? rawSize.x : rawSize.z)) rearScore += Math.sign(along(t.centroid)) * 0.05;
+    }
+  }
+  // glTF convention is +Z forward, so with no evidence assume the rear is at -Z.
+  const rearSign = rearScore === 0 ? -1 : Math.sign(rearScore);
+  // Rotate so the front ends up at -Z (rear at +X → yaw -90°, rear at -X → +90°).
+  const yaw = longX ? (rearSign > 0 ? -Math.PI / 2 : Math.PI / 2) : rearSign > 0 ? 0 : Math.PI;
+  const orient = new THREE.Matrix4().makeRotationY(yaw);
+
+  const model = new Map<THREE.Mesh, THREE.Matrix4>();
+  for (const m of meshes) model.set(m, orient.clone().multiply(m.matrixWorld));
+  for (const list of tris.values()) list?.forEach((t) => t.centroid.applyMatrix4(orient));
+
+  const boxOf = (m: THREE.Mesh) => {
+    m.geometry.computeBoundingBox();
+    return m.geometry.boundingBox!.clone().applyMatrix4(model.get(m)!);
+  };
+
+  // --- Wheels: name match, then spatial clustering into wheel units.
+  const wheelMeshes = meshes.filter((m) => WHEEL_RE.test(nameChain(m, scene)) && !/steering|spare/i.test(nameChain(m, scene)));
+  const clusters: { box: THREE.Box3; meshes: THREE.Mesh[] }[] = [];
+  for (const m of wheelMeshes) {
+    const b = boxOf(m);
+    const c = b.getCenter(new THREE.Vector3());
+    const hit = clusters.find((k) => {
+      const kc = k.box.getCenter(new THREE.Vector3());
+      const r = Math.max(k.box.max.y - k.box.min.y, b.max.y - b.min.y) * 0.5;
+      return Math.hypot(kc.y - c.y, kc.z - c.z) < r && Math.abs(kc.x - c.x) < r * 1.2;
+    });
+    if (hit) {
+      hit.box.union(b);
+      hit.meshes.push(m);
+    } else clusters.push({ box: b, meshes: [m] });
+  }
+
+  const bodyMeshes = meshes.filter((m) => !wheelMeshes.includes(m));
+  const bodyBox = new THREE.Box3();
+  bodyMeshes.forEach((m) => bodyBox.union(boxOf(m)));
+  const bodyWidth = bodyBox.max.x - bodyBox.min.x;
+  // Centre-mounted "wheels" (e.g. a spare on the tailgate) belong to the body.
+  const wheelUnits = clusters.filter((k) => Math.abs(k.box.getCenter(new THREE.Vector3()).x - (bodyBox.min.x + bodyBox.max.x) / 2) > bodyWidth * 0.2);
+  for (const k of clusters) if (!wheelUnits.includes(k)) bodyMeshes.push(...k.meshes);
+  if (wheelUnits.length < 2) bodyMeshes.push(...wheelUnits.splice(0).flatMap((k) => k.meshes));
+
+  const fullBox = new THREE.Box3();
+  meshes.forEach((m) => fullBox.union(boxOf(m)));
+  const bodyOnly = new THREE.Box3();
+  bodyMeshes.forEach((m) => bodyOnly.union(boxOf(m)));
+  const H = bodyOnly.max.y - bodyOnly.min.y;
+  const halfL = (bodyOnly.max.z - bodyOnly.min.z) / 2;
+  const midZ = (bodyOnly.max.z + bodyOnly.min.z) / 2;
+
+  // --- Palette classification for atlas meshes.
+  let liveryColor: THREE.Color | null = null;
+  const headCentres: THREE.Vector3[] = [];
+
+  // Swatch statistics across *all* body meshes, so separate parts (spoiler,
+  // mirrors) that share the body's paint swatch are classified the same way.
+  type Group = { n: number; color: number[]; ySum: number; yMax: number; zSum: number };
+  const groups = new Map<number, Group>();
+  for (const m of bodyMeshes) {
+    for (const t of tris.get(m) ?? []) {
+      const g = groups.get(t.region) ?? { n: 0, color: t.color, ySum: 0, yMax: -Infinity, zSum: 0 };
+      g.n++;
+      g.ySum += t.centroid.y;
+      g.yMax = Math.max(g.yMax, t.centroid.y);
+      g.zSum += t.centroid.z;
+      groups.set(t.region, g);
+    }
+  }
+  const regionClass = new Map<number, PartClass>();
+  const yRel = (y: number) => (y - bodyOnly.min.y) / H;
+  for (const [k, g] of groups) {
+    if (lum(g.color) > 0.72 && g.color[2] >= g.color[0] - 0.02 && sat(g.color) < 0.35 && yRel(g.ySum / g.n) > 0.5) regionClass.set(k, 'glass');
+  }
+  // Paint: the biggest surface that reaches the roof.
+  let paintKey = -1;
+  let best = 0;
+  for (const [k, g] of groups) {
+    if (regionClass.has(k) || yRel(g.yMax) < 0.8 || lum(g.color) < 0.12) continue;
+    if (g.n > best) {
+      best = g.n;
+      paintKey = k;
+    }
+  }
+  if (paintKey >= 0) {
+    regionClass.set(paintKey, 'paint');
+    const c = groups.get(paintKey)!.color;
+    liveryColor = new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace);
+  }
+  let totalTris = 0;
+  for (const g of groups.values()) totalTris += g.n;
+  for (const [k, g] of groups) {
+    if (regionClass.has(k)) continue;
+    const zRel = (g.zSum / g.n - midZ) / halfL;
+    const headLike = YELLOW(g.color) || (lum(g.color) > 0.9 && g.color[2] < g.color[0] + 0.03 && yRel(g.ySum / g.n) > 0.35);
+    if (headLike && zRel < -0.75) regionClass.set(k, 'head');
+    else if ((RED(g.color) || (g.color[0] > 0.8 && g.color[1] < 0.6 && g.color[2] < 0.35)) && zRel > 0.75) regionClass.set(k, 'tail');
+    else if (lum(g.color) < 0.3) regionClass.set(k, 'trim');
+    // Small bright parts low on the body are number plates.
+    else if (lum(g.color) > 0.72) regionClass.set(k, 'plate');
+    // A big mid-tone panel group is the lower body/bumpers: body-coloured on a modern sedan.
+    else if (g.n > totalTris * 0.2) regionClass.set(k, 'paint');
+    else regionClass.set(k, 'plastic');
+  }
+
+  const classifyPalette = (list: TriInfo[], wheel: boolean): PartClass[] =>
+    wheel ? list.map((t) => (lum(t.color) < 0.3 ? 'tire' : 'rim')) : list.map((t) => regionClass.get(t.region) ?? 'plastic');
+
+  const makePart = (m: THREE.Mesh, wheel: boolean, matrix: THREE.Matrix4): PartTemplate => {
+    const originals = Array.isArray(m.material) ? m.material : [m.material];
+    const list = tris.get(m);
+    let geometry = m.geometry;
+    let classes: PartClass[];
+    if (list) {
+      // Re-index triangles grouped by class so each class gets its own material slot.
+      const perTri = classifyPalette(list, wheel);
+      const heads = list.filter((_, i) => perTri[i] === 'head');
+      if (heads.length) headCentres.push(heads.reduce((acc, t) => acc.add(t.centroid), new THREE.Vector3()).multiplyScalar(1 / heads.length));
+      const order = [...new Set(perTri)];
+      const src = geometry.getIndex();
+      const idx = (i: number) => (src ? src.getX(i) : i);
+      const out: number[] = [];
+      geometry = geometry.clone();
+      geometry.clearGroups();
+      for (let slot = 0; slot < order.length; slot++) {
+        const start = out.length;
+        perTri.forEach((cls, tri) => {
+          if (cls === order[slot]) out.push(idx(tri * 3), idx(tri * 3 + 1), idx(tri * 3 + 2));
+        });
+        geometry.addGroup(start, out.length - start, slot);
+      }
+      geometry.setIndex(out);
+      classes = order;
+    } else {
+      const chain = nameChain(m, scene);
+      classes = originals.map((mat) => {
+        let cls = classifyByName(`${mat.name} ${chain}`);
+        if (wheel && cls === 'keep') cls = /brake|caliper|disc/i.test(chain + mat.name) ? 'keep' : 'rim';
+        return cls;
+      });
+      // Name says "light" but it sits at the back: it's a tail light.
+      const centre = boxOf(m).getCenter(new THREE.Vector3());
+      classes = classes.map((c) => (c === 'head' && (centre.z - midZ) / halfL > 0.3 ? 'tail' : c));
+      if (classes.includes('head')) headCentres.push(centre);
+    }
+    return { geometry, matrix, classes, originals };
+  };
+
+  const body = bodyMeshes.map((m) => makePart(m, false, model.get(m)!));
+  const wheels: WheelTemplate[] = wheelUnits.map((k) => {
+    const hub = k.box.getCenter(new THREE.Vector3());
+    const inv = new THREE.Matrix4().makeTranslation(-hub.x, -hub.y, -hub.z);
+    return {
+      hub,
+      radius: (k.box.max.y - k.box.min.y) / 2,
+      halfWidth: (k.box.max.x - k.box.min.x) / 2,
+      parts: k.meshes.map((m) => makePart(m, true, inv.clone().multiply(model.get(m)!))),
+    };
+  });
+
+  let headlight: THREE.Vector3 | null = null;
+  if (headCentres.length) {
+    headlight = headCentres.reduce((acc, v) => acc.add(v), new THREE.Vector3()).multiplyScalar(1 / headCentres.length);
+    headlight.x = (bodyOnly.min.x + bodyOnly.max.x) / 2;
+  }
+  return { body, wheels, box: fullBox, liveryColor, headlight };
+}
+
+// ---------------------------------------------------------------------------
+// Instancing
+
+function meshFor(part: PartTemplate, mats: CarMaterialSet): THREE.Mesh {
+  const materials = part.classes.map((cls, i) => (cls === 'keep' ? part.originals[Math.min(i, part.originals.length - 1)] : mats.get(cls)));
+  const mesh = new THREE.Mesh(part.geometry, materials.length === 1 && !part.geometry.groups.length ? materials[0] : materials);
+  part.matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+/** Height of the body's roll/pitch pivot above the ground. */
+const ROLL_CENTRE = 0.45;
+
+function instantiate(t: Template, spec: FitSpec, source: string): VehicleModel {
+  const mats = new CarMaterialSet({
+    paint: spec.paint === -1 ? (t.liveryColor ?? new THREE.Color(0x888888)) : spec.paint,
+    metallic: spec.metallic,
+    rim: spec.rim,
+    tint: spec.tint,
+  });
+  const root = new THREE.Group();
+  root.name = `vehicle:${source}`;
+  const body = new THREE.Group();
+  const shell = new THREE.Group();
+  root.add(body);
+  body.add(shell);
+  body.position.y = ROLL_CENTRE;
+
+  const size = t.box.getSize(new THREE.Vector3());
+  const cx = (t.box.min.x + t.box.max.x) / 2;
+  const sx = spec.width / size.x;
+  const sy = spec.height / size.y;
+  const sz = spec.length / size.z;
+  const rNew = spec.wheelDiameter / 2;
+  const stance = spec.stance ?? 0;
+
+  let axleMid = (t.box.min.z + t.box.max.z) / 2;
+  let hubY0 = t.box.min.y;
+  let wheelScale = 1;
+  if (t.wheels.length) {
+    const zs = t.wheels.map((w) => w.hub.z);
+    axleMid = (Math.min(...zs) + Math.max(...zs)) / 2;
+    hubY0 = t.wheels.reduce((s, w) => s + w.hub.y, 0) / t.wheels.length;
+    const r0 = t.wheels.reduce((s, w) => s + w.radius, 0) / t.wheels.length;
+    wheelScale = rNew / r0;
+  }
+  // Map the stock hub height onto the new wheel radius so arches stay around the tyres.
+  const baseY = t.wheels.length ? rNew + stance - hubY0 * sy : -t.box.min.y * sy;
+  shell.scale.set(sx, sy, sz);
+  shell.position.set(-cx * sx, baseY - ROLL_CENTRE, -axleMid * sz);
+  for (const part of t.body) shell.add(meshFor(part, mats));
+
+  const wheels: WheelRig[] = t.wheels.map((w) => {
+    const steer = new THREE.Group();
+    const spin = new THREE.Group();
+    steer.add(spin);
+    spin.scale.setScalar(wheelScale);
+    const side = Math.sign(w.hub.x - cx) || 1;
+    // Keep the tyre's outer face where the stock model had it (flush with the arch).
+    const outer = (Math.abs(w.hub.x - cx) + w.halfWidth) * sx;
+    steer.position.set(side * (outer - w.halfWidth * wheelScale), rNew, (w.hub.z - axleMid) * sz);
+    for (const part of w.parts) spin.add(meshFor(part, mats));
+    root.add(steer);
+    return { steer, spin, front: w.hub.z < axleMid, left: side < 0, radius: rNew };
+  });
+
+  const zs = wheels.map((w) => w.steer.position.z);
+  const xs = wheels.map((w) => Math.abs(w.steer.position.x));
+  const head = t.headlight
+    ? new THREE.Vector3(0, t.headlight.y * sy + baseY, (t.headlight.z - axleMid) * sz)
+    : new THREE.Vector3(0, 0.7, -spec.length / 2);
+
+  root.add(createContactShadow(spec.length, spec.width));
+  return {
+    root,
+    body,
+    wheels,
+    materials: mats,
+    length: spec.length,
+    width: spec.width,
+    height: spec.height,
+    wheelbase: zs.length ? Math.max(...zs) - Math.min(...zs) : spec.length * 0.6,
+    track: xs.length ? 2 * Math.max(...xs) : spec.width * 0.85,
+    wheelRadius: rNew,
+    headlightPos: head,
+    source,
+    dispose: () => disposeMaterials(mats, root),
+  };
+}
+
+function disposeMaterials(mats: CarMaterialSet, root: THREE.Object3D): void {
+  for (const m of [mats.paint, mats.glass, mats.chrome, mats.trim, mats.plastic, mats.plate, mats.tire, mats.rim, mats.lights.head, mats.lights.tail]) m.dispose();
+  root.removeFromParent();
+}
+
+/** Last-resort body built from primitives when no model could be loaded. */
+function proceduralCar(spec: FitSpec): VehicleModel {
+  const mats = new CarMaterialSet({ paint: spec.paint === -1 ? 0x888888 : spec.paint, metallic: spec.metallic, rim: spec.rim, tint: spec.tint });
+  const root = new THREE.Group();
+  const body = new THREE.Group();
+  body.position.y = ROLL_CENTRE;
+  root.add(body);
+  const r = spec.wheelDiameter / 2;
+  const L = spec.length;
+  const W = spec.width;
+  const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y - ROLL_CENTRE, z);
+    m.castShadow = m.receiveShadow = true;
+    body.add(m);
+  };
+  const lowerH = spec.height * 0.45;
+  add(new THREE.BoxGeometry(W, lowerH, L), mats.paint, 0, r * 0.55 + lowerH / 2, 0);
+  add(new THREE.BoxGeometry(W * 0.84, spec.height * 0.38, L * 0.5), mats.glass, 0, r * 0.55 + lowerH + spec.height * 0.19, L * 0.04);
+  add(new THREE.BoxGeometry(W * 0.86, 0.04, L * 0.46), mats.paint, 0, r * 0.55 + lowerH + spec.height * 0.38, L * 0.04);
+  add(new THREE.BoxGeometry(W * 0.8, 0.12, 0.05), mats.lights.head, 0, r * 0.55 + lowerH * 0.7, -L / 2 - 0.01);
+  add(new THREE.BoxGeometry(W * 0.8, 0.1, 0.05), mats.lights.tail, 0, r * 0.55 + lowerH * 0.75, L / 2 + 0.01);
+  const wheelGeo = new THREE.CylinderGeometry(r, r, 0.24, 24);
+  wheelGeo.rotateZ(Math.PI / 2);
+  const wheels: WheelRig[] = [];
+  const wb = L * 0.6;
+  for (const front of [true, false]) {
+    for (const left of [true, false]) {
+      const steer = new THREE.Group();
+      const spin = new THREE.Group();
+      const tyre = new THREE.Mesh(wheelGeo, mats.tire);
+      tyre.castShadow = true;
+      spin.add(tyre);
+      steer.add(spin);
+      steer.position.set((left ? -1 : 1) * (W / 2 - 0.14), r, front ? -wb / 2 : wb / 2);
+      root.add(steer);
+      wheels.push({ steer, spin, front, left, radius: r });
+    }
+  }
+  root.add(createContactShadow(L, W));
+  return {
+    root,
+    body,
+    wheels,
+    materials: mats,
+    length: L,
+    width: W,
+    height: spec.height,
+    wheelbase: wb,
+    track: W - 0.28,
+    wheelRadius: r,
+    headlightPos: new THREE.Vector3(0, r * 0.55 + lowerH * 0.7, -L / 2),
+    source: 'procedural',
+    dispose: () => {
+      wheelGeo.dispose();
+      body.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+      disposeMaterials(mats, root);
+    },
+  };
+}
