@@ -32,11 +32,13 @@ export class Scenery {
   private sc = new THREE.Vector3();
 
   constructor(scene: THREE.Scene, world: THREE.Object3D, mats: Materials, mobile: boolean) {
-    const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE);
+    // Subdivided: a single 4 km quad gets clipped at the near plane into slivers whose depth
+    // interpolation is too coarse, and the grass then won the depth test over the road near the camera.
+    const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, 80, 80);
     geo.rotateX(-Math.PI / 2);
     mats.grass.map!.repeat.set(TERRAIN_SIZE / GRASS_TILE, TERRAIN_SIZE / GRASS_TILE);
     this.terrain = new THREE.Mesh(geo, mats.grass);
-    this.terrain.position.y = -0.04;
+    this.terrain.position.y = -0.08;
     this.terrain.receiveShadow = true;
     scene.add(this.terrain);
 
