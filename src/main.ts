@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { KMH } from './config';
 import { PLAYER_CARS, findPlayerCar, type VehicleSpec } from './assets/vehicles';
+import { creditFor } from './assets/credits';
 import { VehicleLoader } from './assets/VehicleLoader';
 import { events, type LightingPreset } from './core/EventBus';
 import { GameLoop } from './core/GameLoop';
@@ -85,9 +86,13 @@ async function boot(): Promise<void> {
 
   let view = await viewReady;
   scene.add(view.model.root);
+  const showCar = async () => {
+    const credit = await creditFor(view.model.source);
+    hud.setCar(spec.name, spec.tagline, credit ? `Модель: «${credit.title}» — ${credit.author}, ${credit.license}` : '');
+  };
   const car = new PlayerCar(road.layout, spec.handling, view.model.wheelbase, view.model.width, view.model.length);
   car.speed = 120 * KMH;
-  hud.setCar(spec.name, spec.tagline);
+  void showCar();
 
   await envReady;
   await step('Свет и тени…', 0.85);
@@ -116,7 +121,7 @@ async function boot(): Promise<void> {
       scene.add(view.model.root);
       view.setNight(env.preset === 'night');
       car.setVehicle(spec.handling, view.model.wheelbase, view.model.width, view.model.length);
-      hud.setCar(spec.name, spec.tagline);
+      void showCar();
     } finally {
       switching = false;
     }

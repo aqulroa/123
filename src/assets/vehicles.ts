@@ -48,18 +48,19 @@ export interface VehicleSpec {
 
 const custom = (id: string) => `assets/vehicles/custom/${id}.glb`;
 const kenney = (name: string) => `assets/vehicles/kenney/${name}.glb`;
+const sketchfab = (id: string) => `assets/vehicles/sketchfab/${id}.glb`;
 
 /**
- * Player garage. Licensed models of the real prototypes aren't freely
- * available, so each car rescales a CC0 Kenney shell to the prototype's real
- * dimensions. Dropping `assets/vehicles/custom/<id>.glb` replaces it.
+ * Player garage. Sources are tried in order: a drop-in `custom/<id>.glb`, the
+ * CC BY Sketchfab model of the prototype (scripts/sketchfab-models.mjs), then
+ * a CC0 Kenney shell rescaled to the prototype's real dimensions.
  */
 export const PLAYER_CARS: VehicleSpec[] = [
   {
     id: 'samurai',
     name: 'Samurai II',
     tagline: 'Chaser Tourer · RWD · 2.5 турбо R6',
-    sources: [custom('samurai'), kenney('sedan-sports')],
+    sources: [custom('samurai'), sketchfab('samurai'), kenney('sedan-sports')],
     length: 4.76,
     width: 1.76,
     height: 1.38,
@@ -87,7 +88,7 @@ export const PLAYER_CARS: VehicleSpec[] = [
     id: 'vesta',
     name: 'Vesta RS',
     tagline: 'FWD · лёгкая и острая',
-    sources: [custom('vesta'), kenney('sedan')],
+    sources: [custom('vesta'), sketchfab('vesta'), kenney('sedan')],
     length: 4.41,
     width: 1.76,
     height: 1.47,
@@ -115,7 +116,7 @@ export const PLAYER_CARS: VehicleSpec[] = [
     id: 'priora',
     name: 'Priora Drive',
     tagline: 'FWD · ультра-узкая, лезет в любую щель',
-    sources: [custom('priora'), kenney('sedan')],
+    sources: [custom('priora'), sketchfab('priora'), kenney('sedan')],
     length: 4.35,
     width: 1.68,
     height: 1.42,
@@ -143,7 +144,7 @@ export const PLAYER_CARS: VehicleSpec[] = [
     id: 'bavaria',
     name: 'Bavaria M-Sedan',
     tagline: 'AWD · 625 л.с., моментальная переставка',
-    sources: [custom('bavaria'), kenney('sedan-sports')],
+    sources: [custom('bavaria'), sketchfab('bavaria'), kenney('sedan-sports')],
     length: 4.97,
     width: 1.9,
     height: 1.47,
@@ -171,7 +172,7 @@ export const PLAYER_CARS: VehicleSpec[] = [
     id: 'stuttgart',
     name: 'Stuttgart E-AMG',
     tagline: 'AWD · «утюг», максималка 300+',
-    sources: [custom('stuttgart'), kenney('sedan')],
+    sources: [custom('stuttgart'), sketchfab('stuttgart'), kenney('sedan')],
     length: 4.99,
     width: 1.91,
     height: 1.46,
@@ -198,9 +199,10 @@ export const PLAYER_CARS: VehicleSpec[] = [
 ];
 
 /** Traffic body types for the Step 4 pool (paint `-1` keeps the model's own livery). */
+/** Traffic body types for the Step 4 pool (paint `-1` keeps the model's own livery). */
 export interface TrafficSpec {
   id: string;
-  source: string;
+  sources: string[];
   length: number;
   width: number;
   height: number;
@@ -212,14 +214,14 @@ export interface TrafficSpec {
 const CIVIL_PAINTS = [0xdedede, 0x1a1a1c, 0x8c9096, 0x5b1a1a, 0x23324a, 0xc9c3b4, 0x2f3d33, 0x7a7d80];
 
 export const TRAFFIC_CARS: TrafficSpec[] = [
-  { id: 'sedan', source: kenney('sedan'), length: 4.6, width: 1.8, height: 1.45, wheelDiameter: 0.64, paints: CIVIL_PAINTS, weight: 5 },
-  { id: 'hatch', source: kenney('hatchback-sports'), length: 4.2, width: 1.75, height: 1.42, wheelDiameter: 0.62, paints: CIVIL_PAINTS, weight: 2 },
-  { id: 'suv', source: kenney('suv'), length: 4.7, width: 1.9, height: 1.75, wheelDiameter: 0.74, paints: CIVIL_PAINTS, weight: 3 },
-  { id: 'suv-lux', source: kenney('suv-luxury'), length: 4.9, width: 1.95, height: 1.72, wheelDiameter: 0.76, paints: [0x111111, 0xe5e5e5, 0x3a3d42], weight: 2 },
-  { id: 'taxi', source: kenney('taxi'), length: 4.6, width: 1.8, height: 1.5, wheelDiameter: 0.64, paints: [-1], weight: 2 },
-  { id: 'van', source: kenney('van'), length: 5.3, width: 2.0, height: 2.25, wheelDiameter: 0.7, paints: [0xf2f2f2, 0xd8d8d8], weight: 2 },
-  { id: 'truck', source: kenney('truck'), length: 5.6, width: 2.0, height: 2.0, wheelDiameter: 0.8, paints: [0x8a8f96, 0x1d2a3a, 0xe8e8e8], weight: 1 },
-  { id: 'delivery', source: kenney('delivery'), length: 6.8, width: 2.3, height: 3.0, wheelDiameter: 0.9, paints: [0xf0f0f0], weight: 1 },
+  { id: 'camry', sources: [sketchfab('traffic-camry'), kenney('sedan')], length: 4.81, width: 1.82, height: 1.48, wheelDiameter: 0.66, paints: CIVIL_PAINTS, weight: 4 },
+  { id: 'logan', sources: [sketchfab('traffic-logan'), kenney('sedan')], length: 4.29, width: 1.74, height: 1.53, wheelDiameter: 0.62, paints: CIVIL_PAINTS, weight: 3 },
+  { id: 'zhiguli', sources: [sketchfab('traffic-zhiguli'), kenney('sedan')], length: 4.13, width: 1.62, height: 1.44, wheelDiameter: 0.6, paints: [0xe8e4d8, 0x7a1f1f, 0x2b4a2e, 0x1e2f4f, 0xb8b2a0], weight: 2 },
+  { id: 'octavia', sources: [sketchfab('traffic-octavia'), kenney('hatchback-sports')], length: 4.69, width: 1.83, height: 1.46, wheelDiameter: 0.66, paints: CIVIL_PAINTS, weight: 2 },
+  { id: 'cruiser', sources: [sketchfab('traffic-cruiser'), kenney('suv-luxury')], length: 4.89, width: 1.94, height: 1.85, wheelDiameter: 0.8, paints: [0x111111, 0xe5e5e5, 0x3a3d42], weight: 2 },
+  { id: 'taxi', sources: [sketchfab('traffic-taxi'), kenney('taxi')], length: 4.6, width: 1.8, height: 1.5, wheelDiameter: 0.64, paints: [-1], weight: 2 },
+  { id: 'van', sources: [kenney('van')], length: 5.3, width: 2.0, height: 2.25, wheelDiameter: 0.7, paints: [0xf2f2f2, 0xd8d8d8], weight: 2 },
+  { id: 'kamaz', sources: [sketchfab('traffic-kamaz'), kenney('truck')], length: 7.4, width: 2.5, height: 2.9, wheelDiameter: 1.1, paints: [-1], weight: 1 },
 ];
 
 export const findPlayerCar = (id: string | null): VehicleSpec => PLAYER_CARS.find((c) => c.id === id) ?? PLAYER_CARS[0];

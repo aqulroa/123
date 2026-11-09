@@ -10,8 +10,13 @@ class BodySpring {
 
   step(target: number, hz: number, zeta: number, dt: number): void {
     const w = 2 * Math.PI * hz;
-    this.vel += (w * w * (target - this.angle) - 2 * zeta * w * this.vel) * dt;
-    this.angle += this.vel * dt;
+    // Substep: semi-implicit Euler goes unstable for w·dt ≳ 1 (e.g. a 100 ms hitch on a stiff car).
+    const n = Math.ceil(dt / (1 / 240));
+    const h = dt / n;
+    for (let i = 0; i < n; i++) {
+      this.vel += (w * w * (target - this.angle) - 2 * zeta * w * this.vel) * h;
+      this.angle += this.vel * h;
+    }
   }
 }
 

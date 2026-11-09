@@ -28,7 +28,7 @@ export class Hud {
          <div class="loader__label">Загрузка…</div>
        </div>
        <div class="hud" id="hud">
-         <div class="hud__car"><b></b><small></small></div>
+         <div class="hud__car"><b></b><small></small><em></em></div>
          <div class="hud__speed"><b>0</b><small>км/ч</small></div>
          <div class="hud__info"></div>
          <div class="hud__keys">W/S — газ/тормоз · A/D — руль · 1–5 — машина · C — камера · N — день/ночь · H — HUD</div>
@@ -58,9 +58,10 @@ export class Hud {
     this.root.style.display = this.visible ? '' : 'none';
   }
 
-  setCar(name: string, tagline: string): void {
+  setCar(name: string, tagline: string, credit = ''): void {
     this.car.querySelector('b')!.textContent = name;
     this.car.querySelector('small')!.textContent = tagline;
+    this.car.querySelector('em')!.textContent = credit;
     // Restart the slide-in animation.
     this.car.classList.remove('hud__car--in');
     void this.car.offsetWidth;

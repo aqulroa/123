@@ -10,6 +10,7 @@
 import { copyFile, mkdir, stat, writeFile, rename } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { fetchSketchfab } from './sketchfab.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const force = process.argv.includes('--force');
@@ -111,6 +112,10 @@ try {
 } catch (err) {
   console.warn(`! draco decoder not copied (${err.message}); compressed custom models won't load.`);
 }
+
+// Sketchfab models are optional upgrades over the stock bodies, so their
+// failures are reported but never fail the build.
+await fetchSketchfab(root, { force });
 
 if (failures) {
   console.warn(`${failures} asset(s) missing; the game falls back to procedural substitutes.`);

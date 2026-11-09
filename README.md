@@ -10,9 +10,24 @@ npm run dev        # fetches CC0 assets on first run, then starts Vite
 npm run build      # type-check + production build into dist/ (relative paths for Yandex Games)
 ```
 
-`npm run fetch-assets` downloads the HDRIs (Poly Haven) and vehicle models (Kenney Car Kit), all CC0, into
-`public/assets/` so they ship inside the build. Yandex Games doesn't allow loading from third-party domains at runtime.
-If a download fails, the game falls back to a procedural sky and procedural car bodies. Sources are listed in [CREDITS.md](CREDITS.md).
+`npm run fetch-assets` downloads every asset into `public/assets/`, so it ships inside the build (Yandex Games doesn't
+allow loading from third-party domains at runtime):
+
+- HDRIs (Poly Haven, CC0) and the Kenney Car Kit (CC0): always.
+- Sketchfab models of the real prototypes and traffic cars (CC BY): only with a token.
+
+  ```bash
+  SKETCHFAB_TOKEN=<token from sketchfab.com/settings/password> npm run fetch-assets
+  ```
+
+  The script:
+  - re-checks every license through the Sketchfab API and refuses anything other than CC BY / CC0;
+  - simplifies the meshes and recompresses textures to WebP + Meshopt (`scripts/optimize-glb.mjs`);
+  - writes `public/assets/vehicles/sketchfab/credits.json` and the table in [CREDITS.md](CREDITS.md).
+
+  The optimized `.glb` files are meant to be committed, so builds don't need the token.
+
+If a download fails, the game falls back to the next source: Sketchfab → Kenney → procedural.
 
 ### Controls
 
@@ -30,17 +45,20 @@ URL params: `?car=bavaria`, `?preset=night`, `?intro=0` (skip the crane shot), `
 
 ## Garage
 
-| # | Car | Prototype | Drive | Stock shell |
-| --- | --- | --- | --- | --- |
-| 1 | Samurai II | Toyota Mark II JZX100 | RWD | Kenney `sedan-sports` |
-| 2 | Vesta RS | Lada Vesta Sport | FWD | Kenney `sedan` |
-| 3 | Priora Drive | Lada Priora | FWD | Kenney `sedan` |
-| 4 | Bavaria M-Sedan | BMW M5 F90 | AWD | Kenney `sedan-sports` |
-| 5 | Stuttgart E-AMG | Mercedes-AMG E63 S | AWD | Kenney `sedan` |
+| # | In game | Prototype | Drive | Sketchfab model (CC BY) | Fallback |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Samurai II | Toyota Mark II JZX100 | RWD | [Toyota Chaser Tourer V (JZX100)](https://sketchfab.com/3d-models/d52227ff4f034942a86dfcefe44deeac) — Car2022 | Kenney `sedan-sports` |
+| 2 | Vesta RS | Lada Vesta Sport | FWD | [Lada Vesta](https://sketchfab.com/3d-models/3c333139feb744ae9d36767c0e9cabfd) — tiunov.se | Kenney `sedan` |
+| 3 | Priora Drive | Lada Priora | FWD | [Priora](https://sketchfab.com/3d-models/1551b8223bdf4d78ab3e8e568530836d) — faffdf | Kenney `sedan` |
+| 4 | Bavaria M-Sedan | BMW M5 F90 | AWD | [Bmw M5 F90](https://sketchfab.com/3d-models/5478e978bd634337adc8e3dc413fbfa3) — Res1n | Kenney `sedan-sports` |
+| 5 | Stuttgart E-AMG | Mercedes-AMG E63 S | AWD | [Mercedes-AMG E 63 S (W213)](https://sketchfab.com/3d-models/f61d8efb0b9b4c499fc66fcf35a4d09c) — Car2022 | Kenney `sedan` |
 
-Freely licensed models of the actual prototypes don't exist. Each car therefore rescales a CC0 shell to the prototype's
-real length, width, height and wheel size, with its own paint, tint, rims and handling. To swap in a licensed model,
-drop it into `public/assets/vehicles/custom/<id>.glb` (see the [README there](public/assets/vehicles/custom/README.md)).
+Traffic (for Step 4): Toyota Camry 40, Renault Logan, LADA 2107, Škoda Octavia, Land Cruiser 100, a taxi and a Kamaz,
+all CC BY. The full list is in `scripts/sketchfab-models.mjs`.
+
+Cars use fictional names in the game, and separate badge/logo meshes are hidden. CC BY requires crediting the author, so
+the HUD shows the model credit under the car name. A model in `public/assets/vehicles/custom/<id>.glb` overrides
+everything (see the [README there](public/assets/vehicles/custom/README.md)).
 
 ## Status
 
@@ -60,7 +78,7 @@ drop it into `public/assets/vehicles/custom/<id>.glb` (see the [README there](pu
 
 **Step 2 — vehicle loading (done)**
 
-- `VehicleLoader` (GLTF + Draco + Meshopt) handles arbitrary car models:
+- `VehicleLoader` (GLTF + Draco + Meshopt, tested on Kenney, the three.js Ferrari 458 and Khronos CarConcept) handles arbitrary car models:
   - finds the forward axis from the lights;
   - finds wheels by name and clusters them spatially into four rigged units (steer + spin);
   - classifies surfaces into paint / glass / head / tail / trim / plate / tyre / rim, by node and material names or,
