@@ -35,17 +35,38 @@ If a download fails, the game falls back to the next source: Sketchfab → Kenne
 
 ### Controls
 
+The game opens on a main menu over the live scene: pick a car (‹ ›), a map, and press **ПОЕХАЛИ** (or Enter/Space).
+
 | Key | Action |
 | --- | --- |
 | W / ↑, S / ↓ | throttle / brake |
 | A / ←, D / → | steer freely (hold to change lanes, tap to nudge; the car straightens itself when released) |
-| 1–9, 0 | switch car (ten cars, worst → best) |
+| Esc / P | pause (continue · restart · finish the run) |
+| 1–9, 0 | switch car in the menu (ten cars, worst → best) |
 | C | chase ↔ bumper camera |
-| N | golden hour ↔ wet night |
+| N | cycle lighting (debug) |
 | H | toggle HUD |
 
-URL params: `?car=e34`, `?platform=local` (skip the SDK), `?preset=night`, `?intro=0` (skip the crane shot), `?s=600` (start 600 m down the road),
-`?cam=bumper`.
+On touch screens the HUD shows ◀ ▶ steering buttons and ГАЗ / ТОРМОЗ pedals.
+
+URL params: `?map=sunset|rush|night`, `?car=e34`, `?play=1` (skip the menu), `?platform=local` (skip the SDK),
+`?intro=0` (skip the crane shot), `?s=600` (start 600 m down the road), `?cam=bumper`.
+
+### Maps
+
+| Map | Lighting | Traffic |
+| --- | --- | --- |
+| Закатное шоссе | golden hour (Poly Haven `venice_sunset`) | moderate, 6 cars/km/lane |
+| Полуденный час пик | clear midday (Poly Haven `kloofendal_48d_partly_cloudy_puresky`) | dense, 9 cars/km/lane |
+| Ночная магистраль | wet night (Poly Haven `shanghai_bund`) | light, 5 cars/km/lane |
+
+### Scoring
+
+- **Near Miss** — overtaking a car above 90 km/h with 0.2–0.8 m between the bodies (OBB distance, not centres): +250 × combo,
+  combo +0.25. **Crazy Close** under 0.2 m: +600 at double the combo, combo +0.5.
+- **Double Squeeze** — threading the marking between two cars side by side with < 0.9 m on each side: +1500 × combo, combo +1.
+- Combo ×1.0 – ×5.0 burns out after 3.5 s without an award and resets on any contact with traffic or a barrier.
+- A hard hit (closing speed > 13 m/s ≈ 47 km/h) wrecks the car and ends the run; scrapes only cost the combo.
 
 ## Garage
 
@@ -69,7 +90,7 @@ Grip, steering sharpness and suspension stiffness rise along the list (`handling
 The HUD shows the model credit under the car name. A `public/assets/vehicles/custom/<id>.glb` overrides any car
 (see the [README there](public/assets/vehicles/custom/README.md)).
 
-Traffic models (for Step 4) are low-poly, 1–6k triangles with 512 px textures, in `public/assets/vehicles/traffic`.
+Traffic models are low-poly, 1–6k triangles with 512 px textures, in `public/assets/vehicles/traffic`.
 
 ## Yandex Games SDK
 
@@ -80,10 +101,10 @@ is active.
 | SDK call | When |
 | --- | --- |
 | `features.LoadingAPI.ready()` | the loading screen closes |
-| `features.GameplayAPI.start()` / `stop()` | driving starts; stops for ads and hidden tabs (the simulation pauses too) |
-| `getPlayer().getData()` / `setData()` | the selected car and the best distance |
-| `adv.showFullscreenAdv()` | after switching cars, at most once a minute |
-| `leaderboards.setScore('distance', m)` | best distance, every 30 s and on page hide (authorized players only) |
+| `features.GameplayAPI.start()` / `stop()` | driving starts; stops for the menu, pause, results, ads and hidden tabs (the simulation pauses too) |
+| `getPlayer().getData()` / `setData()` | the selected car and map, volume, best score and best distance |
+| `adv.showFullscreenAdv()` | between runs (restart / back to menu), at most once a minute |
+| `leaderboards.setScore('distance', m)` | distance of each finished run (authorized players only) |
 
 To test against the real SDK locally:
 
@@ -125,18 +146,48 @@ npx @yandex-games/sdk-dev-proxy -p dist --dev-mode=true   # https://localhost:80
 
 **Yandex Games SDK adapter (done, ahead of Step 6)** — see above.
 
-Next steps: 3 — deeper chassis physics (weight transfer, drift) · 4 — traffic · 5 — near miss / combo ·
-6 — touch controls.
+**Step 3 — chassis physics (done)** — weight transfer between axles, tyre slip, drivetrain-specific traction, lateral
+and longitudinal load driving body roll / dive / squat.
+
+**Step 4 — traffic without walls (done)**
+
+- `TrafficSystem`: IDM car following, per-lane flow speeds (left fastest), heavy vans keep right, signalled lane
+  changes (indicator first, then a smooth 2–3 s move), cars brake behind the player.
+- No impassable rows: the rearmost car of any would-be roadblock (every open lane covered within 30 m) treats the
+  closing point as a moving obstacle and drops back gently; spawns and lane changes check the same rule with a 10 m
+  margin, and a closing pocket doesn't count as an escape lane.
+- Pocket exits: pocket cars start merging 260 m before the narrowing, match the neighbour lane's speed, and late
+  mergers ask for a zipper gap (the car behind in the neighbouring lane yields); pocket cars never spawn too close to the end.
+- `TrafficView`: object pool per model type (repainted on reuse), brake lights, blinking indicators, body pitch.
+- Player ↔ traffic contacts: SAT on oriented boxes, mass-weighted separation and an impulse with friction.
+- Soak test (240 s, 5–11 cars/km/lane, player at 60/110/200 km/h): no car overlaps, no stuck pocket cars; a
+  full-width row existed within 150 m of the player for at most 1.8 s per run, each time with the rear car already braking out of it.
+
+**Step 5 — Near Miss / Double Squeeze / combo (done)** — see Scoring. **Step 6 — touch controls (done).**
+
+**Menu, audio, image**
+
+- Main menu over the live scene (the car cruises on an autopilot, the camera sweeps around it), garage with stats,
+  three maps, volume; pause and results screens; best score and distance saved through the SDK.
+- Procedural Web Audio, no samples: an engine synth per car (cylinder count, idle/redline, gear count, turbo, grit)
+  driven by a simulated gearbox with shift cuts, load-dependent timbre, turbo whistle and blow-off, overrun
+  crackles, CVT whine for the hybrid; tyre squeal, wind, road rumble, traffic pass-by whoosh, impacts and score cues.
+- Exposure: bloom runs on scene-linear HDR, so its threshold is now per map (3.0 golden, 3.6 day, 1.7 night) and the
+  HDRIs are clamped (sun disc 40, night 4) — the sunset no longer veils the frame, lamps and headlights glow without
+  blowing out. Daytime headlights stay below the bloom threshold; brake lights and indicators cross it.
 
 ## Layout
 
 ```
 src/
 ├── assets/     vehicle manifest, VehicleLoader, car materials
-├── core/       game loop (fixed step), event bus, input, math
+├── audio/      procedural engine / tyres / wind / impacts (Web Audio)
+├── core/       game loop (fixed step), event bus, input, math, OBB (SAT)
+├── gameplay/   maps, Near Miss / Double Squeeze / combo scoring, traffic contacts
 ├── graphics/   environment/IBL, materials, procedural textures, road shader, post FX, camera, scenery
 ├── road/       RoadLayout (pocket zones, lane queries), chunk builder, streamer
+├── traffic/    TrafficSystem (AI, no-wall rule, pocket merges), TrafficView (object pool)
 ├── vehicle/    PlayerCar (handling), CarView (model, suspension, wheels, lights)
 ├── platform/   Yandex Games SDK adapter + local stand-in
-└── ui/         loading screen + HUD
+└── ui/         loading screen, HUD (score, combo, popups, touch pedals), menu / pause / results
 ```
