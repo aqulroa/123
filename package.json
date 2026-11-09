@@ -10,7 +10,8 @@
     "prebuild": "node scripts/fetch-assets.mjs --soft",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "import-model": "node scripts/import-model.mjs"
   },
   "dependencies": {
     "three": "^0.187.0"

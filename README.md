@@ -14,18 +14,22 @@ npm run build      # type-check + production build into dist/ (relative paths fo
 allow loading from third-party domains at runtime):
 
 - HDRIs (Poly Haven, CC0) and the Kenney Car Kit (CC0): always.
-- Sketchfab models of the real prototypes and traffic cars (CC BY): only with a token.
+- Sketchfab models of the real prototypes and traffic cars (CC BY), in one of two ways:
 
   ```bash
+  # a file downloaded by hand from the model's page (Download 3D Model → glTF or "Autoconverted format (glb)")
+  npm run import-model -- samurai ~/Downloads/toyota_chaser_tourer_v_jzx100.zip
+
+  # or all of them at once with an API token
   SKETCHFAB_TOKEN=<token from sketchfab.com/settings/password> npm run fetch-assets
   ```
 
-  The script:
-  - re-checks every license through the Sketchfab API and refuses anything other than CC BY / CC0;
-  - simplifies the meshes and recompresses textures to WebP + Meshopt (`scripts/optimize-glb.mjs`);
-  - writes `public/assets/vehicles/sketchfab/credits.json` and the table in [CREDITS.md](CREDITS.md).
+  Either way:
+  - every license is re-checked through the Sketchfab API, and anything other than CC BY / CC0 is refused;
+  - meshes are simplified and textures recompressed to WebP + Meshopt (`scripts/optimize-glb.mjs`);
+  - attribution is written to `public/assets/vehicles/sketchfab/credits.json` and the table in [CREDITS.md](CREDITS.md).
 
-  The optimized `.glb` files are meant to be committed, so builds don't need the token.
+  The optimized `.glb` files are meant to be committed, so builds don't need the originals or the token.
 
 If a download fails, the game falls back to the next source: Sketchfab → Kenney → procedural.
 

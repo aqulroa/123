@@ -27,6 +27,49 @@ async function getBuffer(url) {
   return new Uint8Array(await res.arrayBuffer());
 }
 
+/** Unpacks a Sketchfab zip (glb or gltf archive) and returns the model path inside it. */
+export async function extractArchive(zip, work) {
+  const files = unzipSync(zip);
+  for (const [name, data] of Object.entries(files)) {
+    if (name.endsWith('/')) continue;
+    const path = join(work, name);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, data);
+  }
+  return findGltf(work);
+}
+
+/** Model metadata, rejecting licenses that don't allow commercial use. */
+export async function licensedMeta(uid) {
+  const meta = await getJson(`${API}/models/${uid}`);
+  if (!ALLOWED_LICENSES.has(meta.license?.slug)) {
+    throw new Error(`license "${meta.license?.label}" is not CC BY/CC0 — not allowed on a commercial platform`);
+  }
+  return meta;
+}
+
+/** Stores attribution for `id` in credits.json and regenerates the CREDITS.md table. */
+export async function recordCredit(root, id, meta) {
+  const dir = join(root, 'public/assets/vehicles/sketchfab');
+  const creditsPath = join(dir, 'credits.json');
+  let credits = {};
+  try {
+    credits = JSON.parse(await readFile(creditsPath, 'utf8'));
+  } catch {
+    credits = {};
+  }
+  credits[id] = {
+    title: meta.name,
+    author: meta.user.displayName || meta.user.username,
+    authorUrl: meta.user.profileUrl,
+    url: meta.viewerUrl,
+    license: meta.license.label,
+    licenseUrl: meta.license.url,
+  };
+  await writeFile(creditsPath, `${JSON.stringify(credits, null, 2)}\n`);
+  await updateCreditsMd(root, credits);
+}
+
 async function findGltf(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
     if (entry.isFile() && /\.(gltf|glb)$/i.test(entry.name)) return join(entry.parentPath ?? entry.path, entry.name);
@@ -43,14 +86,7 @@ async function downloadModel(uid, token, work) {
     return file;
   }
   if (!links.gltf?.url) throw new Error('no glTF archive offered');
-  const files = unzipSync(await getBuffer(links.gltf.url));
-  for (const [name, data] of Object.entries(files)) {
-    if (name.endsWith('/')) continue;
-    const path = join(work, name);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, data);
-  }
-  return findGltf(work);
+  return extractArchive(await getBuffer(links.gltf.url), work);
 }
 
 function creditsMarkdown(credits) {
@@ -74,7 +110,10 @@ async function updateCreditsMd(root, credits) {
   const i = md.indexOf(start);
   const j = md.indexOf(end);
   if (i < 0 || j < 0) return;
-  await writeFile(path, `${md.slice(0, i + start.length)}\n${creditsMarkdown(credits)}\n${md.slice(j)}`);
+  const body = Object.keys(credits).length
+    ? creditsMarkdown(credits)
+    : '_Not imported yet: `npm run import-model -- <id> <file>` or `SKETCHFAB_TOKEN=… npm run fetch-assets`._';
+  await writeFile(path, `${md.slice(0, i + start.length)}\n${body}\n${md.slice(j)}`);
 }
 
 export async function fetchSketchfab(root, { force = false } = {}) {
