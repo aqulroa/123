@@ -56,7 +56,7 @@ export class CarView {
     const { root, body, wheels } = this.model;
     const h = car.handling;
     root.position.set(car.x, 0, -(car.s - origin));
-    root.rotation.y = -(car.psi + car.slip);
+    root.rotation.y = -car.psi;
 
     // Roll outward in a turn, squat on throttle, dive under braking.
     this.roll.step(car.latAccel * h.rollGain, h.suspensionHz, h.damping, dt);
